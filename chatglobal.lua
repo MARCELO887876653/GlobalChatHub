@@ -1,4 +1,4 @@
--- GLOBAL CHAT HUB V5.6.0 | REFERENCE NEON UI | FIREBASE AUTH + CREATOR
+-- GLOBAL CHAT HUB V5.7.0 | NEON UI | FIREBASE AUTH + CREATOR
 -- Canais separados: /global, /brasil, /usa. Salas por codigo em /rooms.
 -- Script externo: nao substitui o filtro/privacidade do TextChatService Roblox.
 -- Nao utilize para burlar restricoes de chat; ver README antes de publicar.
@@ -26,7 +26,7 @@ end
 local state = {
     alive = true, active = "local", minimized = false,
     language = "en", autoTranslate = false,
-    sentAt = -100, messages = 0, errors = 0, unread = 0,
+    sentAt = -100, messages = 0, errors = 0, unread = {},
     lastError = "", privateChannel = nil, connections = {},
     blocked = {}, seen = {}, seenOrder = {}, tabs = {},
     currentInvite = nil, translationHits = 0, privateCode=nil,
@@ -82,6 +82,7 @@ end
 state.language = prefs.detectLanguage()
 
 local MAX_MESSAGES = 50
+local MAX_MESSAGE_BYTES = 400
 local COLORS = {
     bg = Color3.fromRGB(12, 11, 29), panel = Color3.fromRGB(22, 20, 45),
     deep = Color3.fromRGB(16, 15, 34), accent = Color3.fromRGB(140, 91, 255),
@@ -134,6 +135,15 @@ local WORDS = {
 do
     local strings = {
         tooLarge={"Mensagem muito grande (limite de 400 bytes).","Message is too long (400-byte limit).","El mensaje supera el límite de 400 bytes."},
+        search={"Buscar mensagem ou jogador","Find message or player","Buscar mensaje o jugador"},
+        searchCount={"%d resultado(s)","%d result(s)","%d resultado(s)"},
+        copiedMessage={"Mensagem copiada.","Message copied.","Mensaje copiado."},
+        copiedCode={"Código da sala copiado.","Room code copied.","Código de sala copiado."},
+        copyCode={"Copiar código","Copy code","Copiar código"},
+        emptyChannel={"📭 Nenhuma mensagem ainda","📭 No messages yet","📭 Todavía no hay mensajes"},
+        connected={"✓ Conectado ao Firebase","✓ Connected to Firebase","✓ Conectado a Firebase"},
+        connectionLost={"Falha na conexão: %s","Connection failed: %s","Error de conexión: %s"},
+        emptyRoom={"📭 Sala vazia. Compartilhe o código!","📭 Room is empty. Share its code!","📭 Sala vacía. ¡Comparte el código!"},
         sendPending={"O envio anterior ainda está em andamento.","The previous message is still sending.","El mensaje anterior todavía se está enviando."},
         localSent={"Mensagem enviada ao chat local.","Message sent to local chat.","Mensaje enviado al chat local."},
         firebaseSent={"Mensagem enviada ao Firebase.","Message sent to Firebase.","Mensaje enviado a Firebase."},
@@ -722,7 +732,7 @@ ui.logoDivider=instance("Frame",{Position=UDim2.fromOffset(142,30),Size=UDim2.fr
     BackgroundColor3=COLORS.border,BorderSizePixel=0},top)
 local heading=lbl(top,"GLOBAL CHAT HUB",34,COLORS.light,{Name="Heading",Position=UDim2.fromOffset(164,20),
     Size=UDim2.new(1,-480,0,43),Font=Enum.Font.GothamBold,TextWrapped=false,TextTruncate=Enum.TextTruncate.AtEnd})
-local sub=lbl(top,"V5.6 • NEON CHAT",20,COLORS.lilac,{Position=UDim2.fromOffset(164,64),
+local sub=lbl(top,"V5.7 • NEON CHAT",20,COLORS.lilac,{Position=UDim2.fromOffset(164,64),
     Size=UDim2.new(1,-480,0,29),TextWrapped=false})
 local minBtn=btn(top,"-",{Name="Minimize",Size=UDim2.fromOffset(70,60),Position=UDim2.new(1,-185,0,28),
     BackgroundColor3=COLORS.accent,TextSize=36})
@@ -890,6 +900,23 @@ function ui.notice(key, positive, ...)
     ui.statusArgs=table.pack(...)
 end
 
+function ui.copyText(value, noticeKey)
+    local ok=type(setclipboard)=="function" and pcall(setclipboard,value)
+    ui.notice(ok and noticeKey or "copyFailed",ok==true)
+end
+
+function ui.updateUnread()
+    local total=0
+    for _,count in pairs(state.unread) do total=total+count end
+    for key,nav in pairs(ui.nav) do
+        local count=state.unread[key] or 0
+        nav.unread.Text=count>9 and "9+" or tostring(count)
+        nav.unread.Visible=prefs.badge and count>0
+    end
+    badge.Text=total>9 and "9+" or tostring(total)
+    badge.Visible=prefs.badge and total>0
+end
+
 
 local function newMessagePanel(key)
     local frame=instance("Frame",{Name=key,Size=UDim2.fromScale(1,1),BackgroundTransparency=1,Visible=false,ClipsDescendants=true},content)
@@ -909,12 +936,17 @@ local function newMessagePanel(key)
     round(onlineDot)
     local hint=lbl(channelHead,"",18,COLORS.quiet,{Position=UDim2.fromOffset(49,44),Size=UDim2.new(1,-95,0,47),
         TextYAlignment=Enum.TextYAlignment.Top})
-    local bars=instance("Frame",{Name="Signal",Position=UDim2.new(1,-48,0,24),Size=UDim2.fromOffset(38,32),BackgroundTransparency=1},channelHead)
-    for i=1,4 do
-        local line=instance("Frame",{Position=UDim2.new(0,(i-1)*9,1,-i*7),Size=UDim2.fromOffset(4,i*7),
-            BackgroundColor3=Color3.fromRGB(178,93,246),BorderSizePixel=0},bars)
-        corner(line,2)
-    end
+    local searchButton=btn(channelHead,"⌕",{Name="SearchHistory",Position=UDim2.new(1,-112,0,4),
+        Size=UDim2.fromOffset(50,43),TextSize=27,BackgroundColor3=COLORS.nav})
+    local latestButton=btn(channelHead,"↓",{Name="LatestMessage",Position=UDim2.new(1,-56,0,4),
+        Size=UDim2.fromOffset(50,43),TextSize=26,BackgroundColor3=COLORS.nav})
+    local search=instance("TextBox",{Name="HistoryQuery",Position=UDim2.fromOffset(12,48),
+        Size=UDim2.new(1,-136,0,40),BackgroundColor3=COLORS.panel,BorderSizePixel=0,Visible=false,
+        Text="",TextSize=17,TextColor3=COLORS.light,PlaceholderColor3=COLORS.quiet,
+        ClearTextOnFocus=false,Font=Enum.Font.Gotham,TextTruncate=Enum.TextTruncate.AtEnd},channelHead)
+    corner(search,12);ui.text(search,"search","PlaceholderText")
+    local results=lbl(channelHead,"",15,COLORS.lilac,{Name="HistoryResults",Visible=false,
+        Position=UDim2.new(1,-116,0,48),Size=UDim2.fromOffset(106,40),TextXAlignment=Enum.TextXAlignment.Center})
     local scrollTop=105
     local scroll=instance("ScrollingFrame",{Name="Messages",Position=UDim2.fromOffset(0,scrollTop),Size=UDim2.new(1,-2,1,-scrollTop-92),
         BackgroundTransparency=1,BorderSizePixel=0,ScrollBarThickness=7,
@@ -972,6 +1004,14 @@ local function newMessagePanel(key)
         BackgroundTransparency=1,BorderSizePixel=0,TextColor3=COLORS.light,PlaceholderColor3=COLORS.quiet,
         Text="",TextSize=20,Font=Enum.Font.Gotham,ClearTextOnFocus=false,
         TextXAlignment=Enum.TextXAlignment.Left,TextTruncate=Enum.TextTruncate.AtEnd,MultiLine=false},inputWell)
+    local meter=lbl(inputBar,"",12,COLORS.quiet,{Name="MessageLength",Position=UDim2.new(1,-104,1,-14),
+        Size=UDim2.fromOffset(90,14),TextXAlignment=Enum.TextXAlignment.Center,Visible=false})
+    connect(input:GetPropertyChangedSignal("Text"),function()
+        local length=#input.Text
+        meter.Visible=length>0
+        meter.Text=length.."/"..MAX_MESSAGE_BYTES
+        meter.TextColor3=length>MAX_MESSAGE_BYTES and COLORS.bad or COLORS.quiet
+    end)
     local quick=instance("Frame",{Name="QuickActions",Position=UDim2.new(0,5,1,-230),Size=UDim2.new(1,-12,0,138),
         BackgroundColor3=COLORS.deep,Visible=false,BorderSizePixel=0,ZIndex=5},frame)
     corner(quick,20);stroke(quick,COLORS.border,1.2)
@@ -987,24 +1027,51 @@ local function newMessagePanel(key)
         panel.Visible=not panel.Visible
         other.Visible=false
         if panel.Visible then
-            local rest=panel==quick and UDim2.new(0,5,1,-230) or UDim2.new(0,0,1,-148)
+            local rest=panel==quick and UDim2.new(0,5,1,-230) or UDim2.new(0,0,1,-201)
             panel.Position=rest+UDim2.fromOffset(0,12)
             animate(panel,.19,{Position=rest})
         end
     end
-    local emojiPanel=instance("Frame",{Name="Emojis",Position=UDim2.new(0,0,1,-148),Size=UDim2.new(1,-2,0,56),
+    local emojiPanel=instance("Frame",{Name="Emojis",Position=UDim2.new(0,0,1,-201),Size=UDim2.new(1,-2,0,108),
         BackgroundColor3=COLORS.deep,Visible=false,BorderSizePixel=0,ZIndex=5},frame)
     corner(emojiPanel,18);stroke(emojiPanel,COLORS.border,1)
     connect(plusBtn.Activated,function() togglePopover(quick,emojiPanel) end)
     connect(emoji.Activated,function() togglePopover(emojiPanel,quick) end)
-    local commonEmojis={"💜","😂","🔥","😍","👍","🎮"}
+    local commonEmojis={"💜","😂","🔥","😍","👍","🎮","👋","👏","🙌","😎","😅","❤️"}
     for i,glyph in ipairs(commonEmojis) do
-        local b=btn(emojiPanel,glyph,{Position=UDim2.new((i-1)/6,0,0,1),Size=UDim2.new(1/6,-2,1,-2),
+        local b=btn(emojiPanel,glyph,{Position=UDim2.new(((i-1)%6)/6,0,math.floor((i-1)/6)/2,1),Size=UDim2.new(1/6,-2,.5,-2),
             TextSize=26,BackgroundTransparency=1,ZIndex=6})
         connect(b.Activated,function() input.Text=input.Text..glyph;emojiPanel.Visible=false;input:CaptureFocus() end)
     end
     local tab={frame=frame,title=title,hint=hint,scroll=scroll,layout=layout,input=input,send=send,
         count=0,entries={},channel=key,quick=quick,emojiPanel=emojiPanel,head=channelHead,online=onlinePill,onlineDot=onlineDot,composer=inputBar,scrollToBottom=scrollToBottom}
+    function tab.refreshSearch()
+        local query=search.Visible and search.Text:lower():match("^%s*(.-)%s*$") or ""
+        local found=0
+        for _,entry in ipairs(tab.entries) do
+            local searchable=entry:GetAttribute("HistorySearch")
+            local matches=searchable and searchable:find(query,1,true)~=nil
+            entry.Visible=query=="" or matches==true
+            if searchable and entry.Visible then found=found+1 end
+        end
+        results.Text=tr("searchCount",found)
+    end
+    local function setSearchVisible(visible)
+        search.Visible=visible;results.Visible=visible;hint.Visible=not visible
+        searchButton.Text=visible and "×" or "⌕"
+        if not visible then
+            search:ReleaseFocus()
+            search.Text=""
+        end
+        tab.refreshSearch()
+    end
+    tab.closeSearch=function() setSearchVisible(false) end
+    connect(search:GetPropertyChangedSignal("Text"),tab.refreshSearch)
+    connect(searchButton.Activated,function()
+        setSearchVisible(not search.Visible)
+        if search.Visible then search:CaptureFocus() end
+    end)
+    connect(latestButton.Activated,function() tab.closeSearch();scrollToBottom() end)
     if key=="privado" then
         local control=instance("Frame",{Name="RoomControls",Position=UDim2.fromOffset(0,scrollTop),Size=UDim2.new(1,-2,0,132),
             BackgroundColor3=COLORS.deep,BorderSizePixel=0},frame)
@@ -1021,7 +1088,13 @@ local function newMessagePanel(key)
             PlaceholderText="Nome para convidar",Text="",TextSize=18,Font=Enum.Font.Gotham,ClearTextOnFocus=false},control)
         corner(tab.recipient,10)
         tab.inviteBtn=btn(control,"CONVIDAR",{Position=UDim2.new(1,-154,0,52),Size=UDim2.fromOffset(148,40),BackgroundColor3=COLORS.accent})
-        tab.roomStatus=lbl(control,"Nenhuma sala ativa",17,COLORS.quiet,{Position=UDim2.fromOffset(6,97),Size=UDim2.new(1,-12,0,25)})
+        tab.roomStatus=lbl(control,"Nenhuma sala ativa",17,COLORS.quiet,{Position=UDim2.fromOffset(6,97),Size=UDim2.new(1,-166,0,25)})
+        tab.copyCode=btn(control,"",{Name="CopyRoomCode",Position=UDim2.new(1,-154,0,96),
+            Size=UDim2.fromOffset(148,32),TextSize=16,BackgroundColor3=COLORS.nav,Visible=false})
+        ui.text(tab.copyCode,"copyCode")
+        connect(tab.copyCode.Activated,function()
+            if state.privateCode then ui.copyText(state.privateCode,"copiedCode") end
+        end)
     end
     tab.reflow=function()
         local headH=compact and 112 or 96
@@ -1045,6 +1118,7 @@ local function newMessagePanel(key)
         plusBtn.Size=UDim2.fromOffset(compact and 50 or 54,56)
         send.Position=UDim2.new(1,compact and -76 or -98,0,14)
         send.Size=UDim2.fromOffset(compact and 66 or 82,56)
+        meter.Position=UDim2.new(1,compact and -88 or -104,1,-14)
         if tab.prompt then tab.prompt.Position=UDim2.new(0,0,1,-134) end
     end
     connect(input.Focused,function() ui.focusedInput=input;ui.fit() end)
@@ -1097,7 +1171,7 @@ local function boundTextHeight(value,fontSize,maxWidth)
     if ok and rect then return math.max(fontSize+4,rect.Y) end
     return fontSize+8
 end
-local function addMessage(key, uid, username, text, translated, messageId, sourceLang, gameTitle, placeId, authorAuthUid, sentTimestamp)
+local function addMessage(key, uid, username, text, translated, messageId, sourceLang, gameTitle, placeId, authorAuthUid, sentTimestamp, history)
     if not state.alive or text=="" or state.blocked[uid] then return end
     local p=state.tabs[key];if not p then return end
     if messageId and messageId~="" then
@@ -1126,6 +1200,7 @@ local function addMessage(key, uid, username, text, translated, messageId, sourc
     local textFont=compact and 18 or 23
     local row=instance("Frame",{Name="Message",BackgroundTransparency=1,
         BorderSizePixel=0,LayoutOrder=p.count,Size=UDim2.new(1,-5,0,70)},p.scroll)
+    row:SetAttribute("HistorySearch",(tostring(username).." "..originalText):lower())
     local avatar
     if not outgoing then
         avatar=instance("ImageLabel",{Name="Avatar",Position=UDim2.fromOffset(0,bubbleY-1),
@@ -1185,7 +1260,7 @@ local function addMessage(key, uid, username, text, translated, messageId, sourc
             Size=UDim2.fromOffset(compact and maxBubbleWidth+4 or math.min(280,maxBubbleWidth+4),compact and 30 or 35),BackgroundTransparency=1},row)
         actions.root=rowActions
         local translateBtn=btn(rowActions,tr("translate"),{
-            Position=UDim2.fromOffset(0,1),Size=UDim2.new(.47,-3,1,-2),
+            Position=UDim2.fromOffset(0,1),Size=UDim2.new(.46,-3,1,-2),
             BackgroundColor3=COLORS.violet,TextSize=compact and 12 or 15,
             TextColor3=COLORS.light})
         corner(translateBtn,20)
@@ -1193,18 +1268,18 @@ local function addMessage(key, uid, username, text, translated, messageId, sourc
         ui.text(translateBtn,"translate")
         if key~="local" and (tonumber(uid) or 0)>0 and messageId then
             local reportBtn=btn(rowActions,tr("reportAction"),{
-                Position=UDim2.new(.49,2,0,1),Size=UDim2.new(.51,-4,1,-2),
+                Position=UDim2.new(.46,0,0,1),Size=UDim2.new(.40,-4,1,-2),
                 BackgroundColor3=COLORS.nav,TextSize=compact and 12 or 15,
                 TextColor3=COLORS.lilac})
             corner(reportBtn,20);stroke(reportBtn,COLORS.border,1)
             actions.report=reportBtn
             ui.text(reportBtn,"reportAction")
         end
-        if outgoing==false and tonumber(uid)>0 then
+        if (tonumber(uid) or 0)>0 then
             -- Toque prolongado no avatar para ocultar o usuario localmente.
             if avatar then
                 local holding=false
-                connect(avatar.InputBegan,function(input)
+                avatar.InputBegan:Connect(function(input)
                     if input.UserInputType==Enum.UserInputType.Touch or input.UserInputType==Enum.UserInputType.MouseButton1 then
                         holding=true
                         task.delay(.85,function()
@@ -1215,17 +1290,31 @@ local function addMessage(key, uid, username, text, translated, messageId, sourc
                         end)
                     end
                 end)
-                connect(avatar.InputEnded,function()holding=false end)
+                avatar.InputEnded:Connect(function()holding=false end)
             end
         end
     end
     if actions.report==nil and not outgoing and key=="local" then
-        local reportBtn=btn(actions.root,"⚑ Denunciar",{Position=UDim2.new(.49,2,0,1),
-            Size=UDim2.new(.51,-4,1,-2),BackgroundColor3=COLORS.nav,TextSize=compact and 12 or 15})
+        local reportBtn=btn(actions.root,tr("reportAction"),{Position=UDim2.new(.46,0,0,1),
+            Size=UDim2.new(.40,-4,1,-2),BackgroundColor3=COLORS.nav,TextSize=compact and 12 or 15})
+        ui.text(reportBtn,"reportAction")
         corner(reportBtn,20);stroke(reportBtn,COLORS.border,1)
         reportBtn.Activated:Connect(function()
             openedNative();toast(tr("report"),false)
         end)
+    end
+    if type(setclipboard)=="function" then
+        if outgoing then
+            actions.root=instance("Frame",{Name="Actions",AnchorPoint=Vector2.new(1,0),
+                Size=UDim2.fromOffset(45,30),BackgroundTransparency=1},row)
+        end
+        local copyMessage=btn(actions.root,"⧉",{Name="CopyMessage",Position=UDim2.new(.86,0,0,1),
+            Size=UDim2.new(.14,0,1,-2),TextSize=18,BackgroundColor3=COLORS.nav})
+        if outgoing then
+            copyMessage.Position=UDim2.fromOffset(0,1)
+            copyMessage.Size=UDim2.new(1,0,1,-2)
+        end
+        copyMessage.Activated:Connect(function() ui.copyText(messageLabel.Text,"copiedMessage") end)
     end
     local reasonPanel=nil
     local function recalc()
@@ -1234,7 +1323,9 @@ local function addMessage(key, uid, username, text, translated, messageId, sourc
         bubbleHeight=math.max(compact and 44 or 49,y+20)
         bubble.Size=UDim2.fromOffset(bubbleWidth,bubbleHeight)
         actionsY=bubbleY+bubbleHeight+4
-        if actions.root then actions.root.Position=UDim2.fromOffset(leftIndent+8,actionsY) end
+        if actions.root then
+            actions.root.Position=outgoing and UDim2.new(1,-2,0,actionsY) or UDim2.fromOffset(leftIndent+8,actionsY)
+        end
         if reasonPanel then reasonPanel.Position=UDim2.fromOffset(leftIndent,actionsY+(compact and 32 or 39)) end
         local total=actionsY+(actions.root and (compact and 35 or 43) or 5)+reasonsHeight+2
         row.Size=UDim2.new(1,-5,0,total)
@@ -1263,7 +1354,7 @@ local function addMessage(key, uid, username, text, translated, messageId, sourc
             avatar.Size=UDim2.fromOffset(avatarSize,avatarSize)
             avatar.Position=UDim2.fromOffset(0,bubbleY-1)
         end
-        if actions.root then actions.root.Size=UDim2.fromOffset(compact and maxBubbleWidth+4 or math.min(280,maxBubbleWidth+4),compact and 30 or 35) end
+        if actions.root and not outgoing then actions.root.Size=UDim2.fromOffset(compact and maxBubbleWidth+4 or math.min(280,maxBubbleWidth+4),compact and 30 or 35) end
         if reasonPanel then reasonPanel.Size=UDim2.fromOffset(maxBubbleWidth+4,30) end
         timeLabel.Position=outgoing and UDim2.new(1,-bubbleWidth-64,0,bubbleY+12)
             or UDim2.fromOffset(leftIndent+maxBubbleWidth-52,0)
@@ -1360,10 +1451,11 @@ local function addMessage(key, uid, username, text, translated, messageId, sourc
     if #p.entries>MAX_MESSAGES then
         local old=table.remove(p.entries,1);if old then old:Destroy() end
     end
-    if outgoing then p.scrollToBottom() end
-    if state.active~=key or state.minimized then
-        state.unread=state.unread+1;badge.Visible=prefs.badge
-        badge.Text=state.unread>9 and "9+" or tostring(state.unread)
+    p.refreshSearch()
+    if outgoing and not history then p.scrollToBottom() end
+    if not outgoing and not history and (state.active~=key or state.minimized) then
+        state.unread[key]=math.min(99,(state.unread[key] or 0)+1)
+        ui.updateUnread()
     end
 end
 
@@ -1474,20 +1566,24 @@ makeList(creatorReportScroll,8);addPad(creatorReportScroll,7)
 
 local tabButtons={}
 for i,def in ipairs(tabDefs) do
-    local primary=i<=4
+    local primary=i<=5
     local tab=btn(buttonsHolder,"",{Name=def.key,Size=UDim2.new(1,-2,0,compact and 94 or 104),
         BackgroundColor3=COLORS.nav,TextWrapped=true,AutoButtonColor=false,Visible=primary,LayoutOrder=i})
     corner(tab,28)
     local fill=gradient(tab,Color3.fromRGB(55,42,91),Color3.fromRGB(30,25,56),90)
     local edge=stroke(tab,Color3.fromRGB(89,65,143),1.4)
     local glow=ui.glow(tab,28,Color3.fromRGB(191,89,255),.6);glow.Visible=false
-    local icon=ui.icon(tab,primary and def.key or def.icon,34,UDim2.new(.5,-17,0,compact and 15 or 21))
+    local icon=ui.icon(tab,i<=4 and def.key or def.icon,34,UDim2.new(.5,-17,0,compact and 15 or 21))
     local label=lbl(tab,tr(def.label),compact and 17 or 21,COLORS.light,{Position=UDim2.new(0,0,1,-42),
         Size=UDim2.new(1,0,0,32),TextXAlignment=Enum.TextXAlignment.Center,Font=Enum.Font.GothamBold})
     local selectedDot=instance("Frame",{Name="ActiveDot",Size=UDim2.fromOffset(12,12),Position=UDim2.new(1,-21,0,11),
         Visible=false,BorderSizePixel=0,BackgroundColor3=COLORS.good},tab)
     round(selectedDot);ui.glow(selectedDot,6,COLORS.good,.75)
-    tabButtons[def.key]={button=tab,definition=def,edge=edge,dot=selectedDot,fill=fill,glow=glow,label=label,icon=icon}
+    local unread=lbl(tab,"",13,COLORS.light,{Name="UnreadCount",Position=UDim2.new(1,-35,0,8),
+        Size=UDim2.fromOffset(27,21),BackgroundColor3=COLORS.bad,BackgroundTransparency=0,
+        TextXAlignment=Enum.TextXAlignment.Center,Visible=false})
+    round(unread)
+    tabButtons[def.key]={button=tab,definition=def,edge=edge,dot=selectedDot,fill=fill,glow=glow,label=label,icon=icon,unread=unread}
     ui.nav[def.key]=tabButtons[def.key]
     connect(tab.Activated,function() selected(def.key) end)
 end
@@ -1531,6 +1627,7 @@ function ui.updateRoomText()
     local label=state.privateCode and tr("room",state.privateCode)
     tab.hint.Text=label and label.." • Firebase" or tr("privateHint")
     tab.roomStatus.Text=label and "🔒 "..label or tr("noRoom")
+    tab.copyCode.Visible=state.privateCode~=nil and type(setclipboard)=="function"
 end
 
 local function updateLabels()
@@ -1545,6 +1642,7 @@ local function updateLabels()
         tab.title.Text=tr(ui.tabLabels[key])
         if hints[key] then tab.hint.Text=tr(hints[key]) end
         tab.input.PlaceholderText=tr("typeHere")
+        tab.refreshSearch()
     end
     ui.updateRoomText()
     local language=ui.languageNames[state.language]
@@ -1574,10 +1672,11 @@ selected=function(key)
     ui.shownPage=key
     state.active=key
     animate(ui.settingsButton,.18,{BackgroundColor3=key=="ajustes" and COLORS.violet or COLORS.nav})
-    state.unread=0;badge.Visible=false
+    if not state.minimized then state.unread[key]=nil end
+    ui.updateUnread()
     for k,p in pairs(state.tabs) do
         p.frame.Visible=(k==key)
-        if k~=key then p.quick.Visible=false;p.emojiPanel.Visible=false end
+        if k~=key then p.quick.Visible=false;p.emojiPanel.Visible=false;p.closeSearch() end
     end
     settings.Visible=(key=="ajustes");debugPanel.Visible=(key=="debug");creator.Visible=(key=="criador")
     for k,p in pairs(tabButtons) do
@@ -1616,7 +1715,7 @@ end
 
 refreshStatus=function()
     local lines={
-        "GlobalChatHub V5.6.0 | NEON UI + FIREBASE AUTH",
+        "GlobalChatHub V5.7.0 | NEON UI + FIREBASE AUTH",
         "PlaceId="..tostring(game.PlaceId),
         "Transport="..state.firebaseTransport,
         "FirebaseHTTP="..state.firebaseStatus,
@@ -1667,7 +1766,7 @@ for _, key in ipairs({"motion","glow","badge"}) do
         prefs[key]=not prefs[key]
         prefs.save()
         ui.setGlow()
-        badge.Visible=prefs.badge and state.unread>0
+        ui.updateUnread()
         retranslateUI()
     end)
 end
@@ -1684,7 +1783,7 @@ connect(ui.settings.reset.Activated,function()
     state.language=prefs.detectLanguage()
     prefs.save()
     ui.setGlow()
-    badge.Visible=state.unread>0
+    ui.updateUnread()
     retranslateUI()
     ui.notice("resetDone",true)
     refreshStatus()
@@ -1704,7 +1803,10 @@ connect(ui.settings.clear.Activated,function()
         for _,entry in ipairs(tab.entries) do entry:Destroy() end
         tab.entries={}
         tab.count=0
+        tab.refreshSearch()
     end
+    state.unread={}
+    ui.updateUnread()
     ui.notice("chatCleared",true)
 end)
 connect(copyButton.Activated,function()
@@ -1738,7 +1840,7 @@ local function sendMessage(key,text)
     if not state.alive then return end
     text=trimText(text)
     if text=="" then return end
-    if #text>400 then ui.notice("tooLarge",false);return end
+    if #text>MAX_MESSAGE_BYTES then ui.notice("tooLarge",false);return end
     local when=state.sentByTab[key] or -100
     if os.clock()-when<2.0 then toast(tr("wait"),false);return end
     if state.pendingSend[key] then ui.notice("sendPending",false);return end
@@ -1856,6 +1958,8 @@ local function joinRoom(code)
         tab.roomCode.Text=code
         for _,row in ipairs(tab.entries) do pcall(function() row:Destroy() end) end
         tab.entries={};tab.count=0
+        tab.closeSearch()
+        state.unread.privado=nil
         plainMessage("privado",tr("roomJoined",code))
         selected("privado")
     end)
@@ -2174,11 +2278,14 @@ end)
 local function startChannelPoll(key,path)
     task.spawn(function()
         local first=true
+        local lastConnectionError
         local seen={}
         while state.alive do
             local data,err=fbList(path)
             if not state.alive then break end
             if type(data)=="table" then
+                lastConnectionError=nil
+                local history=first
                 local messages={}
                 for id,entry in pairs(data) do
                     if type(entry)=="table" and not seen[id] then
@@ -2193,7 +2300,8 @@ local function startChannelPoll(key,path)
                     return ta<tb
                 end)
                 if first then
-                    plainMessage(key,#messages==0 and "📭 Nenhuma mensagem ainda" or "✅ Conectado ao Firebase")
+                    local notice=#messages==0 and "emptyChannel" or "connected"
+                    plainMessage(key,tr(notice),notice)
                     first=false
                 end
                 for _,it in ipairs(messages) do
@@ -2202,10 +2310,11 @@ local function startChannelPoll(key,path)
                     addMessage(key,tonumber(m.uid) or 0,tostring(m.u or "?"),content,
                         nil,tostring(it.id),m.lg,
                         m.gn or (type(m.g)=="string" and not tonumber(m.g) and m.g or nil),
-                        m.pid or m.g,m.authUid,m.ts)
+                        m.pid or m.g,m.authUid,m.ts,history)
                 end
-            elseif first then
-                plainMessage(key,"⚠️ Erro de conexão: "..tostring(err))
+            elseif first and lastConnectionError~=tostring(err) then
+                lastConnectionError=tostring(err)
+                plainMessage(key,tr("connectionLost",lastConnectionError))
             end
             if state.active=="debug" then refreshStatus() end
             task.wait(POLL_SECONDS)
@@ -2225,7 +2334,7 @@ task.spawn(function()
             if activeGeneration~=state.roomGeneration then
                 seen={};first=true;activeGeneration=state.roomGeneration
             end
-            local data,err=fbList("rooms/"..code.."/msgs")
+            local data=fbList("rooms/"..code.."/msgs")
             if not state.alive then break end
             if type(data)=="table" and state.privateCode==code and activeGeneration==state.roomGeneration then
                 local messages={}
@@ -2241,18 +2350,16 @@ task.spawn(function()
                     if ta==tb then return tostring(a.id)<tostring(b.id) end
                     return ta<tb
                 end)
-                if first and #messages==0 then plainMessage("privado","📭 Sala vazia. Compartilhe o código!") end
+                local history=first
+                if first and #messages==0 then plainMessage("privado",tr("emptyRoom"),"emptyRoom") end
                 first=false
                 for _,it in ipairs(messages) do
                     local m=it.m
                     addMessage("privado",tonumber(m.uid) or 0,tostring(m.u or "?"),
                         tostring(m.t or ""):sub(1,400),nil,tostring(it.id),m.lg,
                         m.gn or (type(m.g)=="string" and not tonumber(m.g) and m.g or nil),
-                        m.pid or m.g,m.authUid,m.ts)
+                        m.pid or m.g,m.authUid,m.ts,history)
                 end
-            elseif first then
-                plainMessage("privado","⚠️ "..tostring(err))
-                first=false
             end
         end
         task.wait(POLL_SECONDS)
@@ -2392,6 +2499,8 @@ local function minimize()
     if animatingWindow or state.minimized then return end
     animatingWindow=true;state.minimized=true
     if ui.focusedInput then ui.focusedInput:ReleaseFocus() end
+    local panel=state.tabs[state.active]
+    if panel then panel.closeSearch() end
     ui.fit()
     if prefs.motion then animate(ui.motion,.18,{Scale=.94},Enum.EasingStyle.Quart,Enum.EasingDirection.In) end
     local function hide()
@@ -2412,7 +2521,8 @@ local function restore()
     state.minimized=false;main.Visible=true;bubble.Visible=false
     ui.motion.Scale=prefs.motion and .94 or 1
     animate(ui.motion,.25,{Scale=1},Enum.EasingStyle.Quart)
-    state.unread=0;badge.Visible=false
+    state.unread[state.active]=nil
+    ui.updateUnread()
 end
 connect(minBtn.Activated,minimize)
 connect(bubble.Activated,restore)
@@ -2456,4 +2566,4 @@ end)
 -- O painel Debug mostra o status em tempo real e os erros do backend.
 
 
-print("[GlobalChatHub V5.6.0] Neon Chat UI + Firebase REST | canais preservados")
+print("[GlobalChatHub V5.7.0] Neon Chat UI + Firebase REST")
