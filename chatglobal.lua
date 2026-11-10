@@ -1,4 +1,4 @@
--- GLOBAL CHAT HUB V5.7.0 | NEON UI | FIREBASE AUTH + CREATOR
+-- GLOBAL CHAT HUB V5.8.0 | NEON UI | FIREBASE AUTH + CREATOR
 -- Canais separados: /global, /brasil, /usa. Salas por codigo em /rooms.
 -- Script externo: nao substitui o filtro/privacidade do TextChatService Roblox.
 -- Nao utilize para burlar restricoes de chat; ver README antes de publicar.
@@ -26,7 +26,7 @@ end
 local state = {
     alive = true, active = "local", minimized = false,
     language = "en", autoTranslate = false,
-    sentAt = -100, messages = 0, errors = 0, unread = {},
+    sentAt = -100, messages = 0, errors = 0, unread = {}, mentions = {},
     lastError = "", privateChannel = nil, connections = {},
     blocked = {}, seen = {}, seenOrder = {}, tabs = {},
     currentInvite = nil, translationHits = 0, privateCode=nil,
@@ -38,6 +38,7 @@ local state = {
 local prefs = {
     file = "GlobalChatHub_UI_Settings.json",
     language = "auto", motion = true, glow = true, badge = true, startup = "global",
+    mentionsOnly=false, mutedChannels={},
 }
 do
     local saved = store.GCH_V5_UISettings
@@ -52,8 +53,18 @@ do
         if saved.startup == "local" or saved.startup == "brasil" or saved.startup == "usa" then
             prefs.startup = saved.startup
         end
-        for _, key in ipairs({"motion", "glow", "badge", "autoTranslate"}) do
+        for _, key in ipairs({"motion", "glow", "badge", "autoTranslate", "mentionsOnly"}) do
             if type(saved[key]) == "boolean" then prefs[key] = saved[key] end
+        end
+        if type(saved.mutedChannels)=="table" then
+            for _,key in ipairs({"local","global","brasil","usa","privado"}) do
+                prefs.mutedChannels[key]=saved.mutedChannels[key]==true or nil
+            end
+        end
+        if type(saved.blocked)=="table" then
+            for id,enabled in pairs(saved.blocked) do
+                if type(id)=="string" and id:match("^%d+$") and enabled==true then state.blocked[id]=true end
+            end
         end
     end
     state.autoTranslate = prefs.autoTranslate == true
@@ -62,6 +73,7 @@ function prefs.save()
     local data = {
         language = prefs.language, motion = prefs.motion, glow = prefs.glow,
         badge = prefs.badge, startup = prefs.startup, autoTranslate = state.autoTranslate,
+        mentionsOnly=prefs.mentionsOnly, mutedChannels=prefs.mutedChannels, blocked=state.blocked,
     }
     store.GCH_V5_UISettings = data
     if type(writefile) == "function" then
@@ -136,6 +148,15 @@ do
     local strings = {
         tooLarge={"Mensagem muito grande (limite de 400 bytes).","Message is too long (400-byte limit).","El mensaje supera el límite de 400 bytes."},
         search={"Buscar mensagem ou jogador","Find message or player","Buscar mensaje o jugador"},
+        alertsSection={"ALERTAS E SILÊNCIO","ALERTS AND MUTES","ALERTAS Y SILENCIO"},
+        mentionsOnly={"Contar apenas menções","Count mentions only","Contar solo menciones"},
+        mutedChannel={"Silenciar %s","Mute %s","Silenciar %s"},
+        unmutePlayers={"Reexibir jogadores ocultos (%d)","Unhide players (%d)","Mostrar jugadores ocultos (%d)"},
+        replyTo={"Respondendo a %s","Replying to %s","Respondiendo a %s"},
+        quoteGone={"A mensagem original saiu do histórico carregado.","The original message is outside the loaded history.","El mensaje original salió del historial cargado."},
+        savedMessage={"Marcada nesta sessão.","Starred for this session.","Marcado en esta sesión."},
+        unsavedMessage={"Marca removida.","Star removed.","Marca eliminada."},
+        hiddenPlayer={"%s ocultado neste dispositivo.","%s hidden on this device.","%s oculto en este dispositivo."},
         searchCount={"%d resultado(s)","%d result(s)","%d resultado(s)"},
         copiedMessage={"Mensagem copiada.","Message copied.","Mensaje copiado."},
         copiedCode={"Código da sala copiado.","Room code copied.","Código de sala copiado."},
@@ -732,7 +753,7 @@ ui.logoDivider=instance("Frame",{Position=UDim2.fromOffset(142,30),Size=UDim2.fr
     BackgroundColor3=COLORS.border,BorderSizePixel=0},top)
 local heading=lbl(top,"GLOBAL CHAT HUB",34,COLORS.light,{Name="Heading",Position=UDim2.fromOffset(164,20),
     Size=UDim2.new(1,-480,0,43),Font=Enum.Font.GothamBold,TextWrapped=false,TextTruncate=Enum.TextTruncate.AtEnd})
-local sub=lbl(top,"V5.7 • NEON CHAT",20,COLORS.lilac,{Position=UDim2.fromOffset(164,64),
+local sub=lbl(top,"V5.8 • NEON CHAT",20,COLORS.lilac,{Position=UDim2.fromOffset(164,64),
     Size=UDim2.new(1,-480,0,29),TextWrapped=false})
 local minBtn=btn(top,"-",{Name="Minimize",Size=UDim2.fromOffset(70,60),Position=UDim2.new(1,-185,0,28),
     BackgroundColor3=COLORS.accent,TextSize=36})
@@ -910,11 +931,48 @@ function ui.updateUnread()
     for _,count in pairs(state.unread) do total=total+count end
     for key,nav in pairs(ui.nav) do
         local count=state.unread[key] or 0
-        nav.unread.Text=count>9 and "9+" or tostring(count)
+        nav.unread.Text=state.mentions[key] and "@" or (count>9 and "9+" or tostring(count))
         nav.unread.Visible=prefs.badge and count>0
     end
     badge.Text=total>9 and "9+" or tostring(total)
     badge.Visible=prefs.badge and total>0
+end
+
+function ui.markRead(key)
+    state.unread[key]=nil
+    state.mentions[key]=nil
+    ui.updateUnread()
+end
+
+function ui.quoteParts(text)
+    local quote,body=text:match("^(↪ @[%w_]+: [^\r\n]+)\n(.+)$")
+    return quote,body or text
+end
+
+function ui.makeQuote(username,text)
+    local _,body=ui.quoteParts(text)
+    local excerpt=trimText((body:gsub("%s+"," ")))
+    if #excerpt>76 then
+        local boundary=utf8.offset(excerpt,0,77)
+        excerpt=excerpt:sub(1,boundary-1).."…"
+    end
+    if excerpt=="" then return nil end
+    return "↪ @"..username..": "..excerpt
+end
+
+function ui.hasMention(text)
+    local target=player.Name:lower()
+    for name in text:lower():gmatch("%f[%w_@]@([%w_]+)") do
+        if name==target then return true end
+    end
+    return false
+end
+
+function ui.hidePlayer(uid,username)
+    state.blocked[tostring(uid)]=true
+    prefs.save()
+    retranslateUI()
+    ui.notice("hiddenPlayer",true,tostring(username))
 end
 
 
@@ -936,10 +994,12 @@ local function newMessagePanel(key)
     round(onlineDot)
     local hint=lbl(channelHead,"",18,COLORS.quiet,{Position=UDim2.fromOffset(49,44),Size=UDim2.new(1,-95,0,47),
         TextYAlignment=Enum.TextYAlignment.Top})
-    local searchButton=btn(channelHead,"⌕",{Name="SearchHistory",Position=UDim2.new(1,-112,0,4),
-        Size=UDim2.fromOffset(50,43),TextSize=27,BackgroundColor3=COLORS.nav})
-    local latestButton=btn(channelHead,"↓",{Name="LatestMessage",Position=UDim2.new(1,-56,0,4),
-        Size=UDim2.fromOffset(50,43),TextSize=26,BackgroundColor3=COLORS.nav})
+    local searchButton=btn(channelHead,"⌕",{Name="SearchHistory",Position=UDim2.new(1,-144,0,4),
+        Size=UDim2.fromOffset(42,43),TextSize=27,BackgroundColor3=COLORS.nav})
+    local starsButton=btn(channelHead,"☆",{Name="StarredHistory",Position=UDim2.new(1,-97,0,4),
+        Size=UDim2.fromOffset(42,43),TextSize=25,BackgroundColor3=COLORS.nav})
+    local latestButton=btn(channelHead,"↓",{Name="LatestMessage",Position=UDim2.new(1,-50,0,4),
+        Size=UDim2.fromOffset(42,43),TextSize=26,BackgroundColor3=COLORS.nav})
     local search=instance("TextBox",{Name="HistoryQuery",Position=UDim2.fromOffset(12,48),
         Size=UDim2.new(1,-136,0,40),BackgroundColor3=COLORS.panel,BorderSizePixel=0,Visible=false,
         Text="",TextSize=17,TextColor3=COLORS.light,PlaceholderColor3=COLORS.quiet,
@@ -1006,12 +1066,13 @@ local function newMessagePanel(key)
         TextXAlignment=Enum.TextXAlignment.Left,TextTruncate=Enum.TextTruncate.AtEnd,MultiLine=false},inputWell)
     local meter=lbl(inputBar,"",12,COLORS.quiet,{Name="MessageLength",Position=UDim2.new(1,-104,1,-14),
         Size=UDim2.fromOffset(90,14),TextXAlignment=Enum.TextXAlignment.Center,Visible=false})
-    connect(input:GetPropertyChangedSignal("Text"),function()
-        local length=#input.Text
-        meter.Visible=length>0
-        meter.Text=length.."/"..MAX_MESSAGE_BYTES
-        meter.TextColor3=length>MAX_MESSAGE_BYTES and COLORS.bad or COLORS.quiet
-    end)
+    local replyBar=instance("Frame",{Name="ReplyPreview",Position=UDim2.fromOffset(0,-35),
+        Size=UDim2.new(1,0,0,32),BackgroundColor3=COLORS.nav,BorderSizePixel=0,Visible=false},inputBar)
+    corner(replyBar,9)
+    local replyLabel=lbl(replyBar,"",14,COLORS.lilac,{Position=UDim2.fromOffset(9,0),
+        Size=UDim2.new(1,-54,1,0),TextWrapped=false,TextTruncate=Enum.TextTruncate.AtEnd})
+    local cancelReply=btn(replyBar,"×",{Name="CancelReply",Position=UDim2.new(1,-39,0,0),
+        Size=UDim2.fromOffset(39,32),TextSize=21})
     local quick=instance("Frame",{Name="QuickActions",Position=UDim2.new(0,5,1,-230),Size=UDim2.new(1,-12,0,138),
         BackgroundColor3=COLORS.deep,Visible=false,BorderSizePixel=0,ZIndex=5},frame)
     corner(quick,20);stroke(quick,COLORS.border,1.2)
@@ -1045,13 +1106,31 @@ local function newMessagePanel(key)
     end
     local tab={frame=frame,title=title,hint=hint,scroll=scroll,layout=layout,input=input,send=send,
         count=0,entries={},channel=key,quick=quick,emojiPanel=emojiPanel,head=channelHead,online=onlinePill,onlineDot=onlineDot,composer=inputBar,scrollToBottom=scrollToBottom}
+    function tab.refreshComposer()
+        local length=#trimText(input.Text)
+        if tab.reply and length>0 then length=length+#tab.reply.quote+1 end
+        meter.Visible=length>0
+        meter.Text=length.."/"..MAX_MESSAGE_BYTES
+        meter.TextColor3=length>MAX_MESSAGE_BYTES and COLORS.bad or COLORS.quiet
+        replyBar.Visible=tab.reply~=nil
+        if tab.reply then replyLabel.Text=tr("replyTo",tab.reply.username) end
+    end
+    function tab.setReply(reply)
+        tab.reply=reply
+        tab.refreshComposer()
+        tab.reflow()
+    end
+    connect(input:GetPropertyChangedSignal("Text"),tab.refreshComposer)
+    connect(cancelReply.Activated,function() tab.setReply(nil) end)
     function tab.refreshSearch()
         local query=search.Visible and search.Text:lower():match("^%s*(.-)%s*$") or ""
         local found=0
         for _,entry in ipairs(tab.entries) do
             local searchable=entry:GetAttribute("HistorySearch")
             local matches=searchable and searchable:find(query,1,true)~=nil
-            entry.Visible=query=="" or matches==true
+            local blocked=state.blocked[tostring(entry:GetAttribute("MessageUID"))]
+            local starred=not tab.onlyStars or entry:GetAttribute("Starred")==true
+            entry.Visible=not blocked and starred and (query=="" or matches==true)
             if searchable and entry.Visible then found=found+1 end
         end
         results.Text=tr("searchCount",found)
@@ -1071,7 +1150,31 @@ local function newMessagePanel(key)
         setSearchVisible(not search.Visible)
         if search.Visible then search:CaptureFocus() end
     end)
-    connect(latestButton.Activated,function() tab.closeSearch();scrollToBottom() end)
+    local function setStars(enabled)
+        tab.onlyStars=enabled
+        starsButton.Text=enabled and "★" or "☆"
+        tab.refreshSearch()
+    end
+    connect(starsButton.Activated,function() setStars(not tab.onlyStars) end)
+    connect(latestButton.Activated,function() setStars(false);tab.closeSearch();scrollToBottom() end)
+    function tab.jumpToQuote(quote)
+        local match
+        for _,entry in ipairs(tab.entries) do
+            if entry:GetAttribute("QuoteKey")==quote and not state.blocked[tostring(entry:GetAttribute("MessageUID"))] then
+                if match then ui.notice("quoteGone",false);return end
+                match=entry
+            end
+        end
+        if not match then ui.notice("quoteGone",false);return end
+        setStars(false)
+        tab.closeSearch()
+        task.defer(function()
+            if not match.Parent then return end
+            local scale=math.max(.01,ui.scale.Scale*ui.motion.Scale)
+            scroll.CanvasPosition=Vector2.new(0,math.max(0,scroll.CanvasPosition.Y+
+                (match.AbsolutePosition.Y-scroll.AbsolutePosition.Y)/scale))
+        end)
+    end
     if key=="privado" then
         local control=instance("Frame",{Name="RoomControls",Position=UDim2.fromOffset(0,scrollTop),Size=UDim2.new(1,-2,0,132),
             BackgroundColor3=COLORS.deep,BorderSizePixel=0},frame)
@@ -1110,7 +1213,7 @@ local function newMessagePanel(key)
         if tab.controls then tab.controls.Position=UDim2.fromOffset(0,scrollTop) end
         local extra=tab.controls and 139 or 0
         scroll.Position=UDim2.fromOffset(0,scrollTop+extra)
-        scroll.Size=UDim2.new(1,-2,1,-scrollTop-extra-96)
+        scroll.Size=UDim2.new(1,-2,1,-scrollTop-extra-96-(tab.reply and 35 or 0))
         input.TextSize=compact and 17 or 20
         inputWell.Position=UDim2.fromOffset(compact and 68 or 84,14)
         inputWell.Size=UDim2.new(1,compact and -154 or -198,0,56)
@@ -1171,8 +1274,8 @@ local function boundTextHeight(value,fontSize,maxWidth)
     if ok and rect then return math.max(fontSize+4,rect.Y) end
     return fontSize+8
 end
-local function addMessage(key, uid, username, text, translated, messageId, sourceLang, gameTitle, placeId, authorAuthUid, sentTimestamp, history)
-    if not state.alive or text=="" or state.blocked[uid] then return end
+local function addMessage(key, uid, username, text, translated, messageId, sourceLang, gameTitle, placeId, authorAuthUid, sentTimestamp, history, accountName)
+    if not state.alive or text=="" or state.blocked[tostring(uid)] then return end
     local p=state.tabs[key];if not p then return end
     if messageId and messageId~="" then
         local mark=key.."/"..tostring(messageId)
@@ -1195,12 +1298,19 @@ local function addMessage(key, uid, username, text, translated, messageId, sourc
     local reported=false
     local translating=false
     local originalText=tostring(text)
+    local quote,body=ui.quoteParts(originalText)
+    if key=="local" then quote=nil;body=originalText end
+    local handle=accountName or username
+    local validName=type(handle)=="string" and #handle<=32 and handle:match("^[%w_]+$")
+    local quoteKey=key~="local" and validName and ui.makeQuote(handle,originalText)
+    local mentioned=not outgoing and ui.hasMention(body)
     local actualTranslation=translated and tostring(translated) or ""
     local showingTranslation=false
     local textFont=compact and 18 or 23
     local row=instance("Frame",{Name="Message",BackgroundTransparency=1,
         BorderSizePixel=0,LayoutOrder=p.count,Size=UDim2.new(1,-5,0,70)},p.scroll)
-    row:SetAttribute("HistorySearch",(tostring(username).." "..originalText):lower())
+    row:SetAttribute("HistorySearch",(tostring(username).." "..tostring(handle).." "..originalText):lower())
+    if quoteKey then row:SetAttribute("QuoteKey",quoteKey) end
     local avatar
     if not outgoing then
         avatar=instance("ImageLabel",{Name="Avatar",Position=UDim2.fromOffset(0,bubbleY-1),
@@ -1250,8 +1360,16 @@ local function addMessage(key, uid, username, text, translated, messageId, sourc
         lbl(bubble,"✓",28,COLORS.light,{Position=UDim2.new(1,-43,0,0),Size=UDim2.new(0,34,1,0),
             TextXAlignment=Enum.TextXAlignment.Center})
     end
-    local messageLabel=lbl(bubble,originalText,textFont,COLORS.light,{
-        Position=UDim2.fromOffset(22,7),Size=UDim2.new(1,outgoing and -68 or -44,1,-14),
+    local quoteHeight=quote and 30 or 0
+    if quote then
+        local link=btn(bubble,quote,{Name="JumpToQuote",Position=UDim2.fromOffset(8,4),
+            Size=UDim2.new(1,-16,0,25),TextSize=13,TextTruncate=Enum.TextTruncate.AtEnd,
+            BackgroundColor3=COLORS.deep})
+        link.Activated:Connect(function() p.jumpToQuote(quote) end)
+    end
+    if mentioned then stroke(bubble,COLORS.gold,2) end
+    local messageLabel=lbl(bubble,body,textFont,COLORS.light,{
+        Position=UDim2.fromOffset(22,7+quoteHeight),Size=UDim2.new(1,outgoing and -68 or -44,1,-14-quoteHeight),
         TextWrapped=true,TextXAlignment=Enum.TextXAlignment.Left,
         TextYAlignment=Enum.TextYAlignment.Center})
     local actions={}
@@ -1284,8 +1402,7 @@ local function addMessage(key, uid, username, text, translated, messageId, sourc
                         holding=true
                         task.delay(.85,function()
                             if holding and state.alive and row.Parent then
-                                state.blocked[uid]=true
-                                toast(tostring(username).." ocultado nesta interface",true)
+                                ui.hidePlayer(uid,username)
                             end
                         end)
                     end
@@ -1293,6 +1410,42 @@ local function addMessage(key, uid, username, text, translated, messageId, sourc
                 avatar.InputEnded:Connect(function()holding=false end)
             end
         end
+    end
+    local utilities=instance("Frame",{Name="MessageTools",AnchorPoint=Vector2.new(outgoing and 1 or 0,0),
+        Size=UDim2.fromOffset(1,32),BackgroundTransparency=1},row)
+    local toolIndex=0
+    local function messageTool(name,label,callback)
+        local button=btn(utilities,label,{Name=name,Position=UDim2.fromOffset(toolIndex*48,0),
+            Size=UDim2.fromOffset(43,31),TextSize=18,BackgroundColor3=COLORS.nav})
+        toolIndex=toolIndex+1
+        utilities.Size=UDim2.fromOffset(toolIndex*48-5,32)
+        button.Activated:Connect(callback)
+        return button
+    end
+    local star
+    star=messageTool("StarMessage","☆",function()
+        local enabled=row:GetAttribute("Starred")~=true
+        row:SetAttribute("Starred",enabled)
+        star.Text=enabled and "★" or "☆"
+        p.refreshSearch()
+        ui.notice(enabled and "savedMessage" or "unsavedMessage",true)
+    end)
+    if quoteKey then
+        messageTool("ReplyMessage","↪",function()
+            p.setReply({quote=quoteKey,username=username})
+            p.input:CaptureFocus()
+        end)
+    end
+    if validName and not outgoing and (tonumber(uid) or 0)>0 then
+        messageTool("MentionPlayer","@",function()
+            local prefix=p.input.Text
+            if prefix~="" and not prefix:match("%s$") then prefix=prefix.." " end
+            p.input.Text=prefix.."@"..handle.." "
+            p.input:CaptureFocus()
+        end)
+    end
+    if not outgoing and (tonumber(uid) or 0)>0 then
+        messageTool("MutePlayer","⊘",function() ui.hidePlayer(uid,username) end)
     end
     if actions.report==nil and not outgoing and key=="local" then
         local reportBtn=btn(actions.root,tr("reportAction"),{Position=UDim2.new(.46,0,0,1),
@@ -1318,17 +1471,18 @@ local function addMessage(key, uid, username, text, translated, messageId, sourc
     end
     local reasonPanel=nil
     local function recalc()
-        local str=showingTranslation and actualTranslation or originalText
+        local str=showingTranslation and actualTranslation or body
         local y=boundTextHeight(str,textFont,bubbleWidth-(outgoing and 68 or 44))
-        bubbleHeight=math.max(compact and 44 or 49,y+20)
+        bubbleHeight=math.max(compact and 44 or 49,y+20)+quoteHeight
         bubble.Size=UDim2.fromOffset(bubbleWidth,bubbleHeight)
         actionsY=bubbleY+bubbleHeight+4
         if actions.root then
             actions.root.Position=outgoing and UDim2.new(1,-2,0,actionsY) or UDim2.fromOffset(leftIndent+8,actionsY)
         end
         if reasonPanel then reasonPanel.Position=UDim2.fromOffset(leftIndent,actionsY+(compact and 32 or 39)) end
-        local total=actionsY+(actions.root and (compact and 35 or 43) or 5)+reasonsHeight+2
-        row.Size=UDim2.new(1,-5,0,total)
+        local toolsY=actionsY+(actions.root and (compact and 35 or 43) or 5)+reasonsHeight
+        utilities.Position=outgoing and UDim2.new(1,-2,0,toolsY) or UDim2.fromOffset(leftIndent+8,toolsY)
+        row.Size=UDim2.new(1,-5,0,toolsY+34)
     end
     if actions.translate and actualTranslation~="" and state.autoTranslate then
         showingTranslation=true;state.translationHits=state.translationHits+1
@@ -1368,7 +1522,7 @@ local function addMessage(key, uid, username, text, translated, messageId, sourc
         actions.translate.Activated:Connect(function()
             if actualTranslation~="" then
                 showingTranslation=not showingTranslation
-                messageLabel.Text=showingTranslation and actualTranslation or originalText
+                messageLabel.Text=showingTranslation and actualTranslation or body
                 ui.text(actions.translate,showingTranslation and "original" or "translate")
                 recalc();return
             end
@@ -1382,7 +1536,7 @@ local function addMessage(key, uid, username, text, translated, messageId, sourc
             if source==target then ui.notice("alreadyTranslated",true);return end
             translating=true;ui.text(actions.translate,"translationBusy")
             task.spawn(function()
-                local result,err=translateExternal(originalText,source,target)
+                local result,err=translateExternal(body,source,target)
                 translating=false
                 if not state.alive or not actions.translate.Parent then return end
                 if result then
@@ -1453,8 +1607,10 @@ local function addMessage(key, uid, username, text, translated, messageId, sourc
     end
     p.refreshSearch()
     if outgoing and not history then p.scrollToBottom() end
-    if not outgoing and not history and (state.active~=key or state.minimized) then
+    if not outgoing and not history and not prefs.mutedChannels[key] and (mentioned or not prefs.mentionsOnly)
+        and (state.active~=key or state.minimized) then
         state.unread[key]=math.min(99,(state.unread[key] or 0)+1)
+        if mentioned then state.mentions[key]=true end
         ui.updateUnread()
     end
 end
@@ -1505,6 +1661,12 @@ do
     control("badge")
     control("startup")
     control("reset","reset")
+    section("alertsSection")
+    control("mentionsOnly")
+    for _,def in ipairs(tabDefs) do
+        if messageTabs[def.key] then control("mute_"..def.key) end
+    end
+    control("unmutePlayers")
     section("toolsSection")
     control("connection","testConnection")
     control("clear","clear")
@@ -1643,6 +1805,7 @@ local function updateLabels()
         if hints[key] then tab.hint.Text=tr(hints[key]) end
         tab.input.PlaceholderText=tr("typeHere")
         tab.refreshSearch()
+        tab.refreshComposer()
     end
     ui.updateRoomText()
     local language=ui.languageNames[state.language]
@@ -1659,6 +1822,15 @@ local function updateLabels()
     toggle(ui.settings.motion,"motion",prefs.motion)
     toggle(ui.settings.glow,"glow",prefs.glow)
     toggle(ui.settings.badge,"unreadBadge",prefs.badge)
+    toggle(ui.settings.mentionsOnly,"mentionsOnly",prefs.mentionsOnly)
+    for key in pairs(state.tabs) do
+        local button=ui.settings["mute_"..key]
+        button.Text=(prefs.mutedChannels[key] and "✓  " or "○  ")..tr("mutedChannel",tr(ui.tabLabels[key]))
+        button.BackgroundColor3=prefs.mutedChannels[key] and COLORS.nav or COLORS.panel
+    end
+    local blockedCount=0
+    for _ in pairs(state.blocked) do blockedCount=blockedCount+1 end
+    ui.settings.unmutePlayers.Text=tr("unmutePlayers",blockedCount)
     reportInfo.Text=tr("externalNotice").."\n"..tr("report")
     if ui.statusKey then statusBar.Text=tr(ui.statusKey,table.unpack(ui.statusArgs,1,ui.statusArgs.n)) end
 end
@@ -1672,8 +1844,7 @@ selected=function(key)
     ui.shownPage=key
     state.active=key
     animate(ui.settingsButton,.18,{BackgroundColor3=key=="ajustes" and COLORS.violet or COLORS.nav})
-    if not state.minimized then state.unread[key]=nil end
-    ui.updateUnread()
+    if not state.minimized then ui.markRead(key) else ui.updateUnread() end
     for k,p in pairs(state.tabs) do
         p.frame.Visible=(k==key)
         if k~=key then p.quick.Visible=false;p.emojiPanel.Visible=false;p.closeSearch() end
@@ -1715,7 +1886,7 @@ end
 
 refreshStatus=function()
     local lines={
-        "GlobalChatHub V5.7.0 | NEON UI + FIREBASE AUTH",
+        "GlobalChatHub V5.8.0 | NEON UI + FIREBASE AUTH",
         "PlaceId="..tostring(game.PlaceId),
         "Transport="..state.firebaseTransport,
         "FirebaseHTTP="..state.firebaseStatus,
@@ -1770,6 +1941,26 @@ for _, key in ipairs({"motion","glow","badge"}) do
         retranslateUI()
     end)
 end
+connect(ui.settings.mentionsOnly.Activated,function()
+    prefs.mentionsOnly=not prefs.mentionsOnly
+    if prefs.mentionsOnly then state.unread={};state.mentions={} end
+    prefs.save()
+    ui.updateUnread()
+    retranslateUI()
+end)
+for key in pairs(state.tabs) do
+    connect(ui.settings["mute_"..key].Activated,function()
+        prefs.mutedChannels[key]=not prefs.mutedChannels[key] or nil
+        if prefs.mutedChannels[key] then ui.markRead(key) end
+        prefs.save()
+        retranslateUI()
+    end)
+end
+connect(ui.settings.unmutePlayers.Activated,function()
+    state.blocked={}
+    prefs.save()
+    retranslateUI()
+end)
 connect(ui.settings.startup.Activated,function()
     local nextTab={global="local",["local"]="brasil",brasil="usa",usa="global"}
     prefs.startup=nextTab[prefs.startup]
@@ -1780,6 +1971,7 @@ end)
 connect(ui.settings.reset.Activated,function()
     prefs.language="auto";prefs.startup="global"
     prefs.motion=true;prefs.glow=true;prefs.badge=true;state.autoTranslate=false
+    prefs.mentionsOnly=false;prefs.mutedChannels={};state.blocked={}
     state.language=prefs.detectLanguage()
     prefs.save()
     ui.setGlow()
@@ -1806,6 +1998,7 @@ connect(ui.settings.clear.Activated,function()
         tab.refreshSearch()
     end
     state.unread={}
+    state.mentions={}
     ui.updateUnread()
     ui.notice("chatCleared",true)
 end)
@@ -1838,8 +2031,13 @@ local function isModerated()
 end
 local function sendMessage(key,text)
     if not state.alive then return end
+    local draft=text
+    local panel=state.tabs[key]
+    local reply=panel.reply
+    local generation=state.roomGeneration
     text=trimText(text)
     if text=="" then return end
+    if reply then text=reply.quote.."\n"..text end
     if #text>MAX_MESSAGE_BYTES then ui.notice("tooLarge",false);return end
     local when=state.sentByTab[key] or -100
     if os.clock()-when<2.0 then toast(tr("wait"),false);return end
@@ -1856,7 +2054,7 @@ local function sendMessage(key,text)
             local ok,result=pcall(function() return native:SendAsync(text) end)
             if not state.alive then return end
             if not ok then errorState(result);toast(tr("noSend"),false);return end
-            if state.tabs[key] and state.tabs[key].input.Text==text then state.tabs[key].input.Text="" end
+            if panel.input.Text==draft then panel.input.Text="" end
             ui.notice("localSent",true)
         end)
         return
@@ -1894,8 +2092,15 @@ local function sendMessage(key,text)
         state.pendingSend[key]=nil
         if not state.alive then return end
         if result then
-            local input=state.tabs[key] and state.tabs[key].input
-            if input and input.Text==currentText then input.Text="" end
+            if key~="privado" or generation==state.roomGeneration then
+                if panel.input.Text==draft and panel.reply==reply then
+                    panel.input.Text=""
+                    panel.setReply(nil)
+                end
+            else
+                local roomDraft=panel.roomDrafts and panel.roomDrafts[path]
+                if roomDraft and roomDraft.text==draft and roomDraft.reply==reply then panel.roomDrafts[path]=nil end
+            end
             ui.notice("firebaseSent",true)
             local sentPanel=state.tabs[key]
             if sentPanel then
@@ -1931,7 +2136,8 @@ local function receiveLocal(message)
         local trans=""
         pcall(function() trans=tostring(message.Translation or "") end)
         addMessage("local",uid,name,msg,trans,tostring(message.MessageId or ""),nil,
-            currentGameName,currentPlaceId, nil, message.Timestamp and message.Timestamp.UnixTimestamp or os.time())
+            currentGameName,currentPlaceId,nil,message.Timestamp and message.Timestamp.UnixTimestamp or os.time(),
+            false,sender and sender.Name)
     end)
     if not ok then errorState(err) end
 end
@@ -1947,19 +2153,30 @@ end
 local function joinRoom(code)
     code=tostring(code or ""):upper():gsub("%s+","")
     if not codeValid(code) then ui.notice("invalidRoom",false);return end
+    local tab=state.tabs.privado
+    tab.joinAttempt=(tab.joinAttempt or 0)+1
+    local attempt=tab.joinAttempt
     task.spawn(function()
         local info,err=getRoomInfo(code)
-        if not state.alive then return end
+        if not state.alive or tab.joinAttempt~=attempt then return end
         if not info then toast("❌ "..tostring(err),false);return end
+        if state.privateCode==code then selected("privado");return end
+        tab.roomDrafts=tab.roomDrafts or {}
+        if state.privateCode then
+            local previousPath="/rooms/"..state.privateCode.."/msgs.json"
+            tab.roomDrafts[previousPath]={text=tab.input.Text,reply=tab.reply}
+        end
         state.roomGeneration=state.roomGeneration+1
         state.privateCode=code
-        local tab=state.tabs.privado
+        local saved=tab.roomDrafts["/rooms/"..code.."/msgs.json"]
+        tab.input.Text=saved and saved.text or ""
+        tab.setReply(saved and saved.reply)
         ui.updateRoomText()
         tab.roomCode.Text=code
         for _,row in ipairs(tab.entries) do pcall(function() row:Destroy() end) end
         tab.entries={};tab.count=0
         tab.closeSearch()
-        state.unread.privado=nil
+        ui.markRead("privado")
         plainMessage("privado",tr("roomJoined",code))
         selected("privado")
     end)
@@ -2521,8 +2738,7 @@ local function restore()
     state.minimized=false;main.Visible=true;bubble.Visible=false
     ui.motion.Scale=prefs.motion and .94 or 1
     animate(ui.motion,.25,{Scale=1},Enum.EasingStyle.Quart)
-    state.unread[state.active]=nil
-    ui.updateUnread()
+    ui.markRead(state.active)
 end
 connect(minBtn.Activated,minimize)
 connect(bubble.Activated,restore)
@@ -2566,4 +2782,4 @@ end)
 -- O painel Debug mostra o status em tempo real e os erros do backend.
 
 
-print("[GlobalChatHub V5.7.0] Neon Chat UI + Firebase REST")
+print("[GlobalChatHub V5.8.0] Neon Chat UI + Firebase REST")
