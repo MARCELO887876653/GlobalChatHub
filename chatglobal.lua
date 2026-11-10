@@ -1,4 +1,4 @@
--- GLOBAL CHAT HUB V5.5.3 | REFERENCE NEON UI | FIREBASE AUTH + CREATOR
+-- GLOBAL CHAT HUB V5.6.0 | REFERENCE NEON UI | FIREBASE AUTH + CREATOR
 -- Canais separados: /global, /brasil, /usa. Salas por codigo em /rooms.
 -- Script externo: nao substitui o filtro/privacidade do TextChatService Roblox.
 -- Nao utilize para burlar restricoes de chat; ver README antes de publicar.
@@ -11,6 +11,7 @@ local TextChatService = game:GetService("TextChatService")
 local UserInputService = game:GetService("UserInputService")
 local Http = game:GetService("HttpService")
 local StarterGui = game:GetService("StarterGui")
+local Localization = game:GetService("LocalizationService")
 local player = Players.LocalPlayer
 if not player then return end
 
@@ -24,7 +25,7 @@ end
 
 local state = {
     alive = true, active = "local", minimized = false,
-    language = "pt", autoTranslate = false, sounds = false,
+    language = "en", autoTranslate = false,
     sentAt = -100, messages = 0, errors = 0, unread = 0,
     lastError = "", privateChannel = nil, connections = {},
     blocked = {}, seen = {}, seenOrder = {}, tabs = {},
@@ -34,6 +35,52 @@ local state = {
     roomGeneration=0, sentByTab={}, pendingSend={}, inviteLast=0,
     moderation={banned=false,muteUntil=0}, admin={token=nil,refreshToken=nil,uid=nil,expireAt=0,loginPending=false,reportSeen={},reports={},loading=false},
 }
+local prefs = {
+    file = "GlobalChatHub_UI_Settings.json",
+    language = "auto", motion = true, glow = true, badge = true, startup = "global",
+}
+do
+    local saved = store.GCH_V5_UISettings
+    if type(saved) ~= "table" and type(readfile) == "function" then
+        local ok, data = pcall(function() return Http:JSONDecode(readfile(prefs.file)) end)
+        if ok then saved = data end
+    end
+    if type(saved) == "table" then
+        if saved.language == "pt" or saved.language == "en" or saved.language == "es" then
+            prefs.language = saved.language
+        end
+        if saved.startup == "local" or saved.startup == "brasil" or saved.startup == "usa" then
+            prefs.startup = saved.startup
+        end
+        for _, key in ipairs({"motion", "glow", "badge", "autoTranslate"}) do
+            if type(saved[key]) == "boolean" then prefs[key] = saved[key] end
+        end
+    end
+    state.autoTranslate = prefs.autoTranslate == true
+end
+function prefs.save()
+    local data = {
+        language = prefs.language, motion = prefs.motion, glow = prefs.glow,
+        badge = prefs.badge, startup = prefs.startup, autoTranslate = state.autoTranslate,
+    }
+    store.GCH_V5_UISettings = data
+    if type(writefile) == "function" then
+        pcall(function() writefile(prefs.file, Http:JSONEncode(data)) end)
+    end
+end
+
+function prefs.detectLanguage()
+    if prefs.language ~= "auto" then return prefs.language end
+    if prefs.region == "BR" then return "pt" end
+    if prefs.region == "US" then return "en" end
+    for _, locale in ipairs({Localization.RobloxLocaleId, Localization.SystemLocaleId}) do
+        local code = string.lower(locale):match("^%a%a")
+        if code == "pt" or code == "en" or code == "es" then return code end
+    end
+    return "en"
+end
+state.language = prefs.detectLanguage()
+
 local MAX_MESSAGES = 50
 local COLORS = {
     bg = Color3.fromRGB(12, 11, 29), panel = Color3.fromRGB(22, 20, 45),
@@ -84,8 +131,86 @@ local WORDS = {
         translationHint="Local: traducción Roblox disponible. Firebase: traducción externa a pedido.",
     },
 }
-local function tr(key)
-    return (WORDS[state.language] or WORDS.pt)[key] or WORDS.pt[key] or key
+do
+    local strings = {
+        tooLarge={"Mensagem muito grande (limite de 400 bytes).","Message is too long (400-byte limit).","El mensaje supera el límite de 400 bytes."},
+        sendPending={"O envio anterior ainda está em andamento.","The previous message is still sending.","El mensaje anterior todavía se está enviando."},
+        localSent={"Mensagem enviada ao chat local.","Message sent to local chat.","Mensaje enviado al chat local."},
+        firebaseSent={"Mensagem enviada ao Firebase.","Message sent to Firebase.","Mensaje enviado a Firebase."},
+        needRoom={"Crie ou entre em uma sala primeiro.","Create or join a room first.","Primero crea una sala o únete a una."},
+        invalidRoom={"Código inválido.","Invalid room code.","Código inválido."},
+        missingRoom={"Sala não encontrada.","Room not found.","Sala no encontrada."},
+        inviteUsername={"Digite o nome de usuário exato, sem espaços.","Enter the exact username, without spaces.","Escribe el nombre de usuario exacto, sin espacios."},
+        inviteSelf={"Você não pode convidar a si mesmo.","You can’t invite yourself.","No puedes invitarte a ti mismo."},
+        inviteCooldown={"Aguarde 8 s para enviar outro convite.","Wait 8 seconds before sending another invite.","Espera 8 segundos para enviar otra invitación."},
+        inviteSent={"Convite enviado!","Invite sent!","¡Invitación enviada!"},
+        inviteError={"Falha no convite: %s","Could not send invite: %s","No se pudo enviar la invitación: %s"},
+        sendFailed={"Falha no envio: %s","Could not send message: %s","No se pudo enviar el mensaje: %s"},
+        translationFailed={"Tradução indisponível: %s","Translation unavailable: %s","Traducción no disponible: %s"},
+        alreadyTranslated={"A mensagem já está no idioma selecionado.","This message is already in the selected language.","El mensaje ya está en el idioma seleccionado."},
+        unavailable={"Indisponível","Unavailable","No disponible"},
+        reportSent={"Denúncia registrada.","Report submitted.","Denuncia registrada."},
+        reportBusy={"Enviando…","Submitting…","Enviando…"},
+        reportError={"Erro ao denunciar: %s","Could not submit report: %s","No se pudo enviar la denuncia: %s"},
+        offense={"Ofensa","Abuse","Insulto"},
+        harassment={"Assédio","Harassment","Acoso"},
+        other={"Outro","Other","Otro"},
+        settingsIntro={"Personalize como o chat abre e aparece.", "Choose how the chat opens and looks.", "Personaliza cómo se abre y se ve el chat."},
+        languageSection={"IDIOMA E TRADUÇÃO","LANGUAGE AND TRANSLATION","IDIOMA Y TRADUCCIÓN"},
+        visualSection={"APARÊNCIA E COMPORTAMENTO","APPEARANCE AND BEHAVIOR","ASPECTO Y COMPORTAMIENTO"},
+        toolsSection={"FERRAMENTAS E CONTA","TOOLS AND ACCOUNT","HERRAMIENTAS Y CUENTA"},
+        auto={"Automático","Automatic","Automático"},
+        motion={"Animações da interface","Interface animations","Animaciones de la interfaz"},
+        glow={"Brilho neon","Neon glow","Brillo neón"},
+        unreadBadge={"Contador na bolha","Unread badge","Contador en la burbuja"},
+        startup={"Canal inicial","Startup channel","Canal inicial"},
+        reset={"Restaurar preferências","Reset preferences","Restablecer preferencias"},
+        resetDone={"Preferências restauradas.","Preferences reset.","Preferencias restablecidas."},
+        testConnection={"Testar conexão Firebase","Test Firebase connection","Probar conexión Firebase"},
+        testing={"Testando Firebase…","Testing Firebase…","Probando Firebase…"},
+        firebaseReply={"Firebase respondeu (HTTP %s)","Firebase replied (HTTP %s)","Firebase respondió (HTTP %s)"},
+        chatCleared={"Histórico local limpo.","Local history cleared.","Historial local borrado."},
+        copied={"Diagnóstico copiado.","Diagnostics copied.","Diagnóstico copiado."},
+        copyFailed={"Falha ao copiar.","Could not copy.","No se pudo copiar."},
+        console={"Diagnóstico no console.","Diagnostics printed to the console.","Diagnóstico en la consola."},
+        externalNotice={"O Firebase é externo ao Roblox e usa outro sistema de moderação. Evite compartilhar dados pessoais.","Firebase is outside Roblox and uses a separate moderation system. Avoid sharing personal information.","Firebase es externo a Roblox y usa otro sistema de moderación. Evita compartir datos personales."},
+        creatorOpen={"Abrir painel do criador","Open creator dashboard","Abrir panel del creador"},
+        creatorLogin={"Área do criador","Creator area","Área del creador"},
+        creatorHint={"Entre com a conta Firebase Auth autorizada nas regras.","Sign in with the Firebase Auth account allowed by the rules.","Inicia sesión con la cuenta de Firebase Auth autorizada por las reglas."},
+        creatorEmail={"E-mail do administrador Firebase","Firebase admin email","Correo del administrador de Firebase"},
+        creatorPassword={"Senha (não salva)","Password (not saved)","Contraseña (no guardada)"},
+        signIn={"Entrar","Sign in","Iniciar sesión"},
+        validating={"Validando…","Signing in…","Validando…"},
+        signOut={"Sair","Sign out","Cerrar sesión"},
+        refresh={"Atualizar","Refresh","Actualizar"},
+        privateHint={"Sala privada por código • Firebase","Private room by code • Firebase","Sala privada por código • Firebase"},
+        room={"Sala %s","Room %s","Sala %s"},
+        noRoom={"Nenhuma sala ativa","No active room","No hay sala activa"},
+        createRoom={"Criar sala","Create room","Crear sala"},
+        creatingRoom={"Criando…","Creating…","Creando…"},
+        roomCode={"Código","Room code","Código"},
+        joinRoom={"Entrar","Join","Entrar"},
+        inviteName={"Nome para convidar","Username to invite","Usuario para invitar"},
+        sendInvite={"Convidar","Invite","Invitar"},
+        localWelcome={"💬 Chat local usa o TextChatService do Roblox.","💬 Local chat uses Roblox TextChatService.","💬 El chat local usa TextChatService de Roblox."},
+        globalWelcome={"💜 Bem-vindo! Brasil e EUA têm canais separados.","💜 Welcome! Brazil and the US have separate channels.","💜 ¡Bienvenido! Brasil y EE.UU. tienen canales separados."},
+        brazilWelcome={"🇧🇷 Canal brasileiro entre jogos e servidores.","🇧🇷 Brazilian channel across games and servers.","🇧🇷 Canal brasileño entre juegos y servidores."},
+        usWelcome={"🇺🇸 Canal em inglês entre jogos e servidores.","🇺🇸 English channel across games and servers.","🇺🇸 Canal en inglés entre juegos y servidores."},
+        privateWelcome={"🔒 Crie uma sala ou entre com um código.","🔒 Create a room or join with a code.","🔒 Crea una sala o entra con un código."},
+        reportAction={"Denunciar","Report","Denunciar"},
+        translationBusy={"Traduzindo…","Translating…","Traduciendo…"},
+        roomJoined={"🔐 Você entrou na sala %s. Compartilhe o código para convidar.","🔐 You joined room %s. Share the code to invite others.","🔐 Entraste en la sala %s. Comparte el código para invitar."},
+        roomInvite={"🔔 %s convidou você para a sala %s","🔔 %s invited you to room %s","🔔 %s te invitó a la sala %s"},
+        connecting={"Conectando ao Firebase…","Connecting to Firebase…","Conectando a Firebase…"},
+    }
+    for key, values in pairs(strings) do
+        WORDS.pt[key], WORDS.en[key], WORDS.es[key] = values[1], values[2], values[3]
+    end
+end
+local function tr(key, ...)
+    local value = WORDS[state.language][key] or WORDS.pt[key] or key
+    if select("#", ...) > 0 then return string.format(value, ...) end
+    return value
 end
 local function connect(signal, handler)
     local c = signal:Connect(handler)
@@ -119,11 +244,15 @@ local function round(target)
 end
 local function animate(target, seconds, goals, style, direction)
     if not state.alive or not target or not target.Parent then return end
+    if not prefs.motion then
+        for property, value in pairs(goals) do target[property] = value end
+        return
+    end
     local ok,tween=pcall(function()
         return TweenService:Create(target,TweenInfo.new(seconds or 0.2,
             style or Enum.EasingStyle.Quad,direction or Enum.EasingDirection.Out),goals)
     end)
-    if ok and tween then tween:Play() end
+    if ok and tween then tween:Play(); return tween end
 end
 local function gradient(target, a, b, rotate)
     if target:IsA("GuiObject") then target.BackgroundColor3=Color3.new(1,1,1) end
@@ -449,7 +578,7 @@ end)
 local oldGui=player:FindFirstChild("PlayerGui") and player.PlayerGui:FindFirstChild("GlobalChatHub")
 if oldGui then pcall(function() oldGui:Destroy() end) end
 local gui = instance("ScreenGui", {Name="GlobalChatHubV5", ResetOnSpawn=false,
-    IgnoreGuiInset=true, DisplayOrder=900, ZIndexBehavior=Enum.ZIndexBehavior.Sibling})
+    IgnoreGuiInset=true, AutoLocalize=false, DisplayOrder=900, ZIndexBehavior=Enum.ZIndexBehavior.Sibling})
 local attachOK=pcall(function() gui.Parent=game:GetService("CoreGui") end)
 if not attachOK then gui.Parent=player:WaitForChild("PlayerGui") end
 
@@ -465,7 +594,24 @@ local headerH=compact and 94 or 112
 local sideW=compact and 104 or 180
 local footerH=46
 local uiRadius=48
-local ui={panels={},nav={},presence={},normalViewport=viewport}
+local ui={panels={},nav={},presence={},normalViewport=viewport,
+    glows={}, localized={}}
+function ui.text(object, key, property)
+    property = property or "Text"
+    if not ui.localized[object] then
+        object.Destroying:Once(function() ui.localized[object]=nil end)
+    end
+    ui.localized[object] = {key=key, property=property}
+    object[property] = tr(key)
+end
+function ui.setGlow()
+    for object in pairs(ui.glows) do
+        object.Visible = prefs.glow
+    end
+    for key, nav in pairs(ui.nav) do
+        nav.glow.Visible = prefs.glow and key == state.active
+    end
+end
 ui.host=instance("Frame",{Name="ResponsiveCanvas",BackgroundTransparency=1,
     AnchorPoint=Vector2.new(.5,.5),Position=UDim2.fromScale(.5,.53),Size=UDim2.fromOffset(width,height)},gui)
 ui.scale=instance("UIScale",{Scale=1},ui.host)
@@ -479,6 +625,9 @@ function ui.glow(target,radius,color,alpha)
     -- Contornos suaves, sem depender de imagens externas.
     local root=instance("Frame",{Name="SoftGlow",Size=UDim2.fromScale(1,1),BackgroundTransparency=1,
         ZIndex=target.ZIndex,BorderSizePixel=0},target)
+    ui.glows[root]=true
+    root.Destroying:Once(function() ui.glows[root]=nil end)
+    root.Visible=prefs.glow
     corner(root,radius)
     for i=1,4 do
         local layer=instance("Frame",{Size=UDim2.new(1,i*4,1,i*4),Position=UDim2.fromOffset(-i*2,-i*2),
@@ -573,13 +722,14 @@ ui.logoDivider=instance("Frame",{Position=UDim2.fromOffset(142,30),Size=UDim2.fr
     BackgroundColor3=COLORS.border,BorderSizePixel=0},top)
 local heading=lbl(top,"GLOBAL CHAT HUB",34,COLORS.light,{Name="Heading",Position=UDim2.fromOffset(164,20),
     Size=UDim2.new(1,-480,0,43),Font=Enum.Font.GothamBold,TextWrapped=false,TextTruncate=Enum.TextTruncate.AtEnd})
-local sub=lbl(top,"V5.3 • Firebase Auth • Mobile",20,COLORS.lilac,{Position=UDim2.fromOffset(164,64),
+local sub=lbl(top,"V5.6 • NEON CHAT",20,COLORS.lilac,{Position=UDim2.fromOffset(164,64),
     Size=UDim2.new(1,-480,0,29),TextWrapped=false})
 local minBtn=btn(top,"-",{Name="Minimize",Size=UDim2.fromOffset(70,60),Position=UDim2.new(1,-185,0,28),
     BackgroundColor3=COLORS.accent,TextSize=36})
 local closeBtn=btn(top,"X",{Name="Close",Size=UDim2.fromOffset(70,60),Position=UDim2.new(1,-100,0,28),
     BackgroundColor3=COLORS.bad,TextSize=36})
-for _,b in ipairs({minBtn,closeBtn}) do
+ui.settingsButton=btn(top,"⚙",{Name="OpenSettings",TextSize=30,BackgroundColor3=COLORS.nav})
+for _,b in ipairs({ui.settingsButton,minBtn,closeBtn}) do
     corner(b,22);stroke(b,Color3.fromRGB(224,166,255),1.5)
     ui.glow(b,22,b.BackgroundColor3,.75)
 end
@@ -592,8 +742,6 @@ ui.avatarDot=instance("Frame",{Name="OnlineDot",Position=UDim2.new(1,-16,1,-17),
     BackgroundColor3=COLORS.good,BorderSizePixel=0},ui.avatar)
 round(ui.avatarDot);stroke(ui.avatarDot,COLORS.bg,3)
 ui.avatarDot.Visible=false
-ui.avatarDivider=instance("Frame",{Position=UDim2.new(1,-211,0,31),Size=UDim2.fromOffset(1,54),
-    BackgroundColor3=COLORS.border,BorderSizePixel=0},top)
 task.spawn(function()
     local ok,url=pcall(function() return Players:GetUserThumbnailAsync(player.UserId,Enum.ThumbnailType.HeadShot,Enum.ThumbnailSize.Size100x100) end)
     if ok and state.alive and ui.avatar.Parent then ui.avatar.Image=url end
@@ -615,7 +763,7 @@ ui.statusDot=instance("Frame",{Name="StatusDot",Position=UDim2.new(0,48,1,-42),S
     BackgroundColor3=COLORS.good,BorderSizePixel=0},main)
 round(ui.statusDot);ui.glow(ui.statusDot,12,COLORS.good,.85)
 ui.statusCheck=lbl(ui.statusDot,"✓",17,COLORS.light,{Size=UDim2.fromScale(1,1),TextXAlignment=Enum.TextXAlignment.Center})
-local statusBar=lbl(main,"Conectando ao Firebase...",17,COLORS.lilac,{Position=UDim2.new(0,83,1,-43),
+local statusBar=lbl(main,tr("connecting"),17,COLORS.lilac,{Position=UDim2.new(0,83,1,-43),
     Size=UDim2.new(1,-112,0,26),TextWrapped=false,TextTruncate=Enum.TextTruncate.AtEnd})
 local bubble=btn(gui,"",{Name="MiniBubble",Size=UDim2.fromOffset(55,55),Position=UDim2.new(0,12,.46,0),
     BackgroundColor3=COLORS.violet,Visible=false,ZIndex=10})
@@ -654,17 +802,18 @@ function ui.fit()
     ui.logoIcon.Position=UDim2.fromOffset(compact and 9 or 13,compact and 9 or 13)
     ui.logoDivider.Visible=not compact
     heading.Position=UDim2.fromOffset(compact and 86 or 164,compact and 24 or 20)
-    heading.Size=UDim2.new(1,compact and -275 or -480,0,compact and 28 or 43)
+    heading.Size=UDim2.new(1,compact and -310 or -512,0,compact and 28 or 43)
     heading.TextSize=compact and 22 or 34
     sub.Position=UDim2.fromOffset(compact and 86 or 164,compact and 55 or 64)
-    sub.Size=UDim2.new(1,compact and -275 or -480,0,26);sub.TextSize=compact and 13 or 20
+    sub.Size=UDim2.new(1,compact and -310 or -512,0,26);sub.TextSize=compact and 13 or 20
     minBtn.Size=UDim2.fromOffset(compact and 44 or 70,compact and 48 or 60)
     closeBtn.Size=minBtn.Size
     minBtn.Position=UDim2.new(1,compact and -112 or -185,0,compact and 24 or 28)
     closeBtn.Position=UDim2.new(1,compact and -59 or -100,0,compact and 24 or 28)
     ui.avatar.Size=UDim2.fromOffset(compact and 45 or 72,compact and 45 or 72)
-    ui.avatar.Position=UDim2.new(1,compact and -174 or -306,0,24)
-    ui.avatarDivider.Visible=not compact
+    ui.settingsButton.Size=UDim2.fromOffset(compact and 48 or 56,compact and 48 or 60)
+    ui.settingsButton.Position=UDim2.new(1,compact and -166 or -249,0,compact and 24 or 28)
+    ui.avatar.Position=UDim2.new(1,compact and -220 or -340,0,24)
     ui.navLayout.Padding=UDim.new(0,compact and 13 or 15)
     ui.navPad.PaddingLeft=UDim.new(0,compact and 9 or 19)
     ui.navPad.PaddingRight=UDim.new(0,compact and 9 or 16)
@@ -726,11 +875,19 @@ local selected=function() end
 
 local function toast(message, positive)
     if not state.alive then return end
+    ui.statusKey=nil
     statusBar.Text=tostring(message)
+    statusBar.TextTransparency=prefs.motion and .55 or 0
+    animate(statusBar,.22,{TextTransparency=0})
     ui.statusDot.BackgroundColor3=positive and COLORS.good or COLORS.gold
     ui.statusCheck.Text=positive and "✓" or "!"
     statusBar.TextColor3=positive and COLORS.good or COLORS.gold
     if not positive then state.lastError=tostring(message):sub(1,100) end
+end
+function ui.notice(key, positive, ...)
+    toast(tr(key,...),positive)
+    ui.statusKey=key
+    ui.statusArgs=table.pack(...)
 end
 
 
@@ -818,23 +975,33 @@ local function newMessagePanel(key)
     local quick=instance("Frame",{Name="QuickActions",Position=UDim2.new(0,5,1,-230),Size=UDim2.new(1,-12,0,138),
         BackgroundColor3=COLORS.deep,Visible=false,BorderSizePixel=0,ZIndex=5},frame)
     corner(quick,20);stroke(quick,COLORS.border,1.2)
-    local quickDefs={{"⚙ Ajustes","ajustes"},{"🔒 Privado","privado"},{"◉ Status","debug"},{"♛ Criador","criador"}}
+    local quickDefs={{"settingsTab","ajustes"},{"privateTab","privado"},{"debugTab","debug"},{"creatorTab","criador"}}
     for i,def in ipairs(quickDefs) do
-        local action=btn(quick,def[1],{Position=UDim2.new((i-1)%2*.5,8,0,8+math.floor((i-1)/2)*62),
+        local action=btn(quick,tr(def[1]),{Position=UDim2.new((i-1)%2*.5,8,0,8+math.floor((i-1)/2)*62),
             Size=UDim2.new(.5,-16,0,54),BackgroundColor3=COLORS.panel,TextSize=17,ZIndex=6})
         corner(action,16)
-        connect(action.MouseButton1Click,function() quick.Visible=false;selected(def[2]) end)
+        ui.text(action,def[1])
+        connect(action.Activated,function() quick.Visible=false;selected(def[2]) end)
     end
-    connect(plusBtn.MouseButton1Click,function() quick.Visible=not quick.Visible end)
+    local function togglePopover(panel, other)
+        panel.Visible=not panel.Visible
+        other.Visible=false
+        if panel.Visible then
+            local rest=panel==quick and UDim2.new(0,5,1,-230) or UDim2.new(0,0,1,-148)
+            panel.Position=rest+UDim2.fromOffset(0,12)
+            animate(panel,.19,{Position=rest})
+        end
+    end
     local emojiPanel=instance("Frame",{Name="Emojis",Position=UDim2.new(0,0,1,-148),Size=UDim2.new(1,-2,0,56),
         BackgroundColor3=COLORS.deep,Visible=false,BorderSizePixel=0,ZIndex=5},frame)
     corner(emojiPanel,18);stroke(emojiPanel,COLORS.border,1)
-    connect(emoji.MouseButton1Click,function() emojiPanel.Visible=not emojiPanel.Visible;quick.Visible=false end)
+    connect(plusBtn.Activated,function() togglePopover(quick,emojiPanel) end)
+    connect(emoji.Activated,function() togglePopover(emojiPanel,quick) end)
     local commonEmojis={"💜","😂","🔥","😍","👍","🎮"}
     for i,glyph in ipairs(commonEmojis) do
         local b=btn(emojiPanel,glyph,{Position=UDim2.new((i-1)/6,0,0,1),Size=UDim2.new(1/6,-2,1,-2),
             TextSize=26,BackgroundTransparency=1,ZIndex=6})
-        connect(b.MouseButton1Click,function() input.Text=input.Text..glyph;emojiPanel.Visible=false;input:CaptureFocus() end)
+        connect(b.Activated,function() input.Text=input.Text..glyph;emojiPanel.Visible=false;input:CaptureFocus() end)
     end
     local tab={frame=frame,title=title,hint=hint,scroll=scroll,layout=layout,input=input,send=send,
         count=0,entries={},channel=key,quick=quick,emojiPanel=emojiPanel,head=channelHead,online=onlinePill,onlineDot=onlineDot,composer=inputBar,scrollToBottom=scrollToBottom}
@@ -890,7 +1057,7 @@ for _,d in ipairs(tabDefs) do
     if messageTabs[d.key] then newMessagePanel(d.key) end
 end
 
-local function plainMessage(key, message)
+local function plainMessage(key, message, localizedKey)
     local p=state.tabs[key]
     if not p then return end
     p.count=p.count+1
@@ -899,6 +1066,7 @@ local function plainMessage(key, message)
     local line=lbl(row,tostring(message),17,COLORS.quiet,{
         Position=UDim2.fromOffset(3,2),Size=UDim2.new(1,-6,0,30),
         TextXAlignment=Enum.TextXAlignment.Center,TextTruncate=Enum.TextTruncate.AtEnd})
+    if localizedKey then ui.text(line,localizedKey) end
     table.insert(p.entries,row)
     if #p.entries>MAX_MESSAGES then
         local old=table.remove(p.entries,1);if old then old:Destroy() end
@@ -1022,13 +1190,15 @@ local function addMessage(key, uid, username, text, translated, messageId, sourc
             TextColor3=COLORS.light})
         corner(translateBtn,20)
         actions.translate=translateBtn
-        if key~="local" and tonumber(uid)>0 and messageId then
-            local reportBtn=btn(rowActions,"⚑ Denunciar",{
+        ui.text(translateBtn,"translate")
+        if key~="local" and (tonumber(uid) or 0)>0 and messageId then
+            local reportBtn=btn(rowActions,tr("reportAction"),{
                 Position=UDim2.new(.49,2,0,1),Size=UDim2.new(.51,-4,1,-2),
                 BackgroundColor3=COLORS.nav,TextSize=compact and 12 or 15,
                 TextColor3=COLORS.lilac})
             corner(reportBtn,20);stroke(reportBtn,COLORS.border,1)
             actions.report=reportBtn
+            ui.text(reportBtn,"reportAction")
         end
         if outgoing==false and tonumber(uid)>0 then
             -- Toque prolongado no avatar para ocultar o usuario localmente.
@@ -1053,7 +1223,7 @@ local function addMessage(key, uid, username, text, translated, messageId, sourc
         local reportBtn=btn(actions.root,"⚑ Denunciar",{Position=UDim2.new(.49,2,0,1),
             Size=UDim2.new(.51,-4,1,-2),BackgroundColor3=COLORS.nav,TextSize=compact and 12 or 15})
         corner(reportBtn,20);stroke(reportBtn,COLORS.border,1)
-        connect(reportBtn.MouseButton1Click,function()
+        reportBtn.Activated:Connect(function()
             openedNative();toast(tr("report"),false)
         end)
     end
@@ -1071,7 +1241,7 @@ local function addMessage(key, uid, username, text, translated, messageId, sourc
     end
     if actions.translate and actualTranslation~="" and state.autoTranslate then
         showingTranslation=true;state.translationHits=state.translationHits+1
-        actions.translate.Text=tr("original")
+        ui.text(actions.translate,"original")
         messageLabel.Text=actualTranslation
     end
     row:SetAttribute("MessageUID",tonumber(uid) or 0)
@@ -1104,11 +1274,11 @@ local function addMessage(key, uid, username, text, translated, messageId, sourc
     row.Destroying:Once(function() resizeConnection:Disconnect() end)
     resizeMessage()
     if actions.translate then
-        connect(actions.translate.MouseButton1Click,function()
+        actions.translate.Activated:Connect(function()
             if actualTranslation~="" then
                 showingTranslation=not showingTranslation
                 messageLabel.Text=showingTranslation and actualTranslation or originalText
-                actions.translate.Text=showingTranslation and tr("original") or tr("translate")
+                ui.text(actions.translate,showingTranslation and "original" or "translate")
                 recalc();return
             end
             if key=="local" then toast(tr("noTranslation"),false);return end
@@ -1118,19 +1288,19 @@ local function addMessage(key, uid, username, text, translated, messageId, sourc
             if source~="pt" and source~="en" and source~="es" then
                 source=key=="brasil" and "pt" or key=="usa" and "en" or (target=="en" and "pt" or "en")
             end
-            if source==target then toast("Mensagem ja esta no idioma selecionado",true);return end
-            translating=true;actions.translate.Text="⏳ ..."
+            if source==target then ui.notice("alreadyTranslated",true);return end
+            translating=true;ui.text(actions.translate,"translationBusy")
             task.spawn(function()
                 local result,err=translateExternal(originalText,source,target)
                 translating=false
                 if not state.alive or not actions.translate.Parent then return end
                 if result then
                     actualTranslation=result;showingTranslation=true
-                    messageLabel.Text=result;actions.translate.Text=tr("original")
+                    messageLabel.Text=result;ui.text(actions.translate,"original")
                     state.translationHits=state.translationHits+1;recalc()
                 else
-                    actions.translate.Text=tr("translate")
-                    toast("Tradução indisponível: "..tostring(err),false)
+                    ui.text(actions.translate,"translate")
+                    ui.notice("translationFailed",false,tostring(err))
                 end
             end)
         end)
@@ -1138,16 +1308,15 @@ local function addMessage(key, uid, username, text, translated, messageId, sourc
     if actions.report then
         reasonPanel=instance("Frame",{Name="ReportReasons",Size=UDim2.fromOffset(maxBubbleWidth+4,30),
             BackgroundTransparency=1,Visible=false},row)
-        local reasons={"Ofensa","Spam","Assedio","Outro"}
-        local reasonButtons={}
+        local reasons={{"Ofensa","offense"},{"Spam","Spam"},{"Assedio","harassment"},{"Outro","other"}}
         for i,reason in ipairs(reasons) do
-            local rb=btn(reasonPanel,reason,{Position=UDim2.new((i-1)/4,0,0,0),
+            local rb=btn(reasonPanel,tr(reason[2]),{Position=UDim2.new((i-1)/4,0,0,0),
                 Size=UDim2.new(.25,-2,1,0),BackgroundColor3=COLORS.nav,
                 TextColor3=COLORS.gold,TextSize=compact and 8 or 10})
-            corner(rb,11);reasonButtons[#reasonButtons+1]=rb
-            connect(rb.MouseButton1Click,function()
+            corner(rb,11);ui.text(rb,reason[2])
+            rb.Activated:Connect(function()
                 if reported then return end
-                reported=true;actions.report.Text="⏳ Enviando"
+                reported=true;ui.text(actions.report,"reportBusy")
                 task.spawn(function()
                     local result,err=fbPost("/reports.json",{
                         reporter=player.Name,reporterUid=player.UserId,
@@ -1155,23 +1324,23 @@ local function addMessage(key, uid, username, text, translated, messageId, sourc
                         reportedUid=tonumber(uid) or 0,
                         reportedAuthUid=tostring(authorAuthUid or ""),
                         channel=key,ts=os.time(),messageId=tostring(messageId or ""),
-                        message=originalText:sub(1,400),reason=reason,
+                        message=originalText:sub(1,400),reason=reason[1],
                         game=tostring(gameTitle or ""):sub(1,72),placeId=tonumber(placeId) or 0,
                         roomCode=key=="privado" and tostring(state.privateCode or "") or "",
                         status="pending"
                     })
                     if not state.alive or not actions.report.Parent then return end
                     if result then
-                        actions.report.Text="✓ Denunciado";reasonPanel.Visible=false
-                        reasonsHeight=0;recalc();toast("Denúncia registrada",true)
+                        ui.text(actions.report,"reportSent");reasonPanel.Visible=false
+                        reasonsHeight=0;recalc();ui.notice("reportSent",true)
                     else
-                        reported=false;actions.report.Text="⚑ Denunciar"
-                        toast("Erro ao denunciar: "..tostring(err),false)
+                        reported=false;ui.text(actions.report,"reportAction")
+                        ui.notice("reportError",false,tostring(err))
                     end
                 end)
             end)
         end
-        connect(actions.report.MouseButton1Click,function()
+        actions.report.Activated:Connect(function()
             if reported then return end
             showReasons=not showReasons
             reasonPanel.Visible=showReasons
@@ -1179,38 +1348,79 @@ local function addMessage(key, uid, username, text, translated, messageId, sourc
             recalc()
         end)
     end
-    -- Transicao de entrada sutil, sem centenas de tweens em loop.
-    task.defer(function()
-        if not state.alive or not bubble.Parent then return end
-        animate(bubble,.25,{Position=outgoing and UDim2.new(1,-2,0,bubbleY)
-            or UDim2.fromOffset(leftIndent,bubbleY),BackgroundTransparency=0})
-    end)
+    -- Anima o balão dentro da linha, sem alterar o layout ou mover o campo de texto.
+    if prefs.motion and state.active==key and not state.minimized then
+        local bubbleScale=instance("UIScale",{Scale=.94},bubble)
+        animate(bubbleScale,.24,{Scale=1})
+        animate(bubble,.24,{BackgroundTransparency=0})
+    else
+        bubble.BackgroundTransparency=0
+    end
     table.insert(p.entries,row)
     if #p.entries>MAX_MESSAGES then
         local old=table.remove(p.entries,1);if old then old:Destroy() end
     end
     if outgoing then p.scrollToBottom() end
     if state.active~=key or state.minimized then
-        state.unread=state.unread+1;badge.Visible=true
+        state.unread=state.unread+1;badge.Visible=prefs.badge
         badge.Text=state.unread>9 and "9+" or tostring(state.unread)
     end
 end
 
 local settings=instance("ScrollingFrame",{Name="Settings",Size=UDim2.fromScale(1,1),
-    BackgroundTransparency=1,ScrollBarThickness=2,CanvasSize=UDim2.fromOffset(0,0),
-    AutomaticCanvasSize=Enum.AutomaticSize.Y,Visible=false},content)
-addPad(settings,8);makeList(settings,10)
-local settingsTitle=lbl(settings,"⚙️ AJUSTES",22,COLORS.light,{Font=Enum.Font.GothamBold})
-local languageButton=btn(settings,"🌐 PT / EN / ES",{Size=UDim2.new(1,-2,0,40),BackgroundColor3=COLORS.accent})
-local transButton=btn(settings,"🌐 Mostrar tradução: OFF",{Size=UDim2.new(1,-2,0,40),BackgroundColor3=COLORS.panel})
-local translationNote=lbl(settings,"",17,COLORS.quiet,{Size=UDim2.new(1,-8,0,0),AutomaticSize=Enum.AutomaticSize.Y})
-local creatorEntry=btn(settings,"👑 ENTRAR NA AREA DO CRIADOR",{
-    Size=UDim2.new(1,-2,0,40),BackgroundColor3=COLORS.accent})
-local soundsButton=btn(settings,"🔕 Sons: OFF",{Size=UDim2.new(1,-2,0,40),BackgroundColor3=COLORS.panel})
-local nativeButton=btn(settings,"ABRIR CHAT ROBLOX",{Size=UDim2.new(1,-2,0,40),BackgroundColor3=COLORS.accent})
-local clearButton=btn(settings,"LIMPAR MENSAGENS",{Size=UDim2.new(1,-2,0,40),BackgroundColor3=COLORS.panel})
-local settingsNotice=lbl(settings,"⚠️ Firebase é externo: mensagens NÃO passam automaticamente pelo filtro Roblox. Não compartilhe dados pessoais.",17,COLORS.good,
-    {Size=UDim2.new(1,-4,0,0),AutomaticSize=Enum.AutomaticSize.Y})
+    BackgroundTransparency=1,BorderSizePixel=0,ScrollBarThickness=5,
+    ScrollBarImageColor3=COLORS.accent,ScrollingDirection=Enum.ScrollingDirection.Y,
+    CanvasSize=UDim2.fromOffset(0,0),AutomaticCanvasSize=Enum.AutomaticSize.Y,Visible=false},content)
+ui.settings={}
+do
+    local order=0
+    local function item(object)
+        order=order+1
+        object.LayoutOrder=order
+        return object
+    end
+    addPad(settings,10)
+    makeList(settings,9)
+    local title=item(lbl(settings,"",31,COLORS.light,{Font=Enum.Font.GothamBold}))
+    ui.text(title,"settingsTab")
+    local intro=item(lbl(settings,"",19,COLORS.quiet,{
+        Size=UDim2.new(1,-14,0,0),AutomaticSize=Enum.AutomaticSize.Y}))
+    ui.text(intro,"settingsIntro")
+    local function section(key)
+        local title=item(lbl(settings,"",16,COLORS.lilac,{
+            Size=UDim2.new(1,-14,0,35),Font=Enum.Font.GothamBold}))
+        ui.text(title,key)
+    end
+    local function control(id, key)
+        local button=item(btn(settings,"",{
+            Name=id,Size=UDim2.new(1,-14,0,60),BackgroundColor3=COLORS.panel,
+            TextSize=19,TextWrapped=true,TextXAlignment=Enum.TextXAlignment.Left}))
+        corner(button,15)
+        stroke(button,COLORS.border,1).Transparency=.25
+        addPad(button,12)
+        ui.settings[id]=button
+        if key then ui.text(button,key) end
+    end
+    section("languageSection")
+    control("language")
+    control("translation")
+    local note=item(lbl(settings,"",16,COLORS.quiet,{
+        Size=UDim2.new(1,-14,0,0),AutomaticSize=Enum.AutomaticSize.Y}))
+    ui.text(note,"translationHint")
+    section("visualSection")
+    control("motion")
+    control("glow")
+    control("badge")
+    control("startup")
+    control("reset","reset")
+    section("toolsSection")
+    control("connection","testConnection")
+    control("clear","clear")
+    control("creator")
+    local notice=item(lbl(settings,"",16,COLORS.quiet,{
+        Size=UDim2.new(1,-14,0,0),AutomaticSize=Enum.AutomaticSize.Y}))
+    ui.text(notice,"externalNotice")
+end
 
 local debugPanel=instance("ScrollingFrame",{Name="Debug",Size=UDim2.fromScale(1,1),
     BackgroundTransparency=1,ScrollBarThickness=2,CanvasSize=UDim2.fromOffset(0,0),
@@ -1279,53 +1489,96 @@ for i,def in ipairs(tabDefs) do
     round(selectedDot);ui.glow(selectedDot,6,COLORS.good,.75)
     tabButtons[def.key]={button=tab,definition=def,edge=edge,dot=selectedDot,fill=fill,glow=glow,label=label,icon=icon}
     ui.nav[def.key]=tabButtons[def.key]
-    connect(tab.MouseButton1Click,function() selected(def.key) end)
+    connect(tab.Activated,function() selected(def.key) end)
 end
 -- Hover e pressão sem alterar tamanhos calculados pelo layout.
 function ui.bindButton(b)
     if not b:IsA("TextButton") then return end
     local scale=instance("UIScale",{Scale=1},b)
-    connect(b.MouseEnter,function() animate(scale,.13,{Scale=1.025}) end)
-    connect(b.MouseLeave,function() animate(scale,.16,{Scale=1}) end)
-    connect(b.MouseButton1Down,function() animate(scale,.08,{Scale=.96}) end)
-    connect(b.MouseButton1Up,function() animate(scale,.15,{Scale=1}) end)
+    b.MouseEnter:Connect(function() animate(scale,.13,{Scale=prefs.motion and 1.025 or 1}) end)
+    b.MouseLeave:Connect(function() animate(scale,.16,{Scale=1}) end)
+    b.MouseButton1Down:Connect(function() animate(scale,.08,{Scale=prefs.motion and .96 or 1}) end)
+    b.MouseButton1Up:Connect(function() animate(scale,.15,{Scale=1}) end)
 end
 for _,object in ipairs(main:GetDescendants()) do ui.bindButton(object) end
 connect(main.DescendantAdded,function(object) ui.bindButton(object) end)
 ui.fit()
 
+ui.tabLabels={["local"]="localTab",global="globalTab",brasil="brTab",usa="usTab",privado="privateTab"}
+ui.languageNames={pt="Português (Brasil)",en="English (US)",es="Español"}
+ui.statusKey="connecting"
+ui.statusArgs=table.pack()
+ui.text(creatorHead,"creatorTab")
+ui.text(creatorHint,"creatorHint")
+ui.text(creatorEmail,"creatorEmail","PlaceholderText")
+ui.text(creatorPassword,"creatorPassword","PlaceholderText")
+ui.text(creatorLoginBtn,"signIn")
+ui.text(creatorRefresh,"refresh")
+ui.text(creatorLogout,"signOut")
+ui.text(debugTitle,"debugTab")
+ui.text(copyButton,"copy")
+do
+    local private=state.tabs.privado
+    ui.text(private.createBtn,"createRoom")
+    ui.text(private.joinBtn,"joinRoom")
+    ui.text(private.roomCode,"roomCode","PlaceholderText")
+    ui.text(private.recipient,"inviteName","PlaceholderText")
+    ui.text(private.inviteBtn,"sendInvite")
+end
+
+function ui.updateRoomText()
+    local tab=state.tabs.privado
+    local label=state.privateCode and tr("room",state.privateCode)
+    tab.hint.Text=label and label.." • Firebase" or tr("privateHint")
+    tab.roomStatus.Text=label and "🔒 "..label or tr("noRoom")
+end
+
 local function updateLabels()
+    for object, binding in pairs(ui.localized) do
+        if object.Parent then object[binding.property]=tr(binding.key) end
+    end
     for _,p in pairs(tabButtons) do
         p.label.Text=tr(p.definition.label)
     end
-    for k,tab in pairs(state.tabs) do
-        local word={["local"]="localTab",global="globalTab",brasil="brTab",usa="usTab",privado="privateTab"}
-        tab.title.Text=tr(word[k])
-        tab.hint.Text=k=="global" and tr("globalInfo") or (k=="local" and tr("localOnly") or
-            (k=="privado" and (state.privateCode and ("Sala "..state.privateCode.." • Firebase") or "Sala privada por código • Firebase") or
-                (k=="brasil" and "🇧🇷 Chat brasileiro entre todos os jogos" or "🇺🇸 English chat across all games")))
+    local hints={["local"]="localOnly",global="globalInfo",brasil="brazilWelcome",usa="usWelcome"}
+    for key,tab in pairs(state.tabs) do
+        tab.title.Text=tr(ui.tabLabels[key])
+        if hints[key] then tab.hint.Text=tr(hints[key]) end
         tab.input.PlaceholderText=tr("typeHere")
-        tab.send.Text=""
-        if tab.inviteBtn then tab.inviteBtn.Text=tr("inviteButton") end
     end
-    settingsTitle.Text="⚙️ "..tr("settingsTab")
-    creatorEntry.Text=state.admin.token and "👑 ABRIR PAINEL DO CRIADOR" or "👑 ENTRAR NA AREA DO CRIADOR"
-    languageButton.Text="🌐 "..tr("language").." : "..string.upper(state.language)
-    transButton.Text=(state.autoTranslate and "✅  " or "⬜  ")..tr("enableTranslation")
-    soundsButton.Text=(state.sounds and "🔔  " or "🔕  ")..tr("sound")
-    translationNote.Text=tr("translationHint")
-    nativeButton.Text="📡 TESTAR CONEXÃO FIREBASE"
-    clearButton.Text=tr("clear")
-    debugTitle.Text="🔍 "..tr("debugTab")
-    copyButton.Text=tr("copy")
-    reportInfo.Text="⚠️ Firebase nao filtra automaticamente mensagens como o Roblox.\n"..tr("report")
+    ui.updateRoomText()
+    local language=ui.languageNames[state.language]
+    if prefs.language=="auto" then language=tr("auto").." · "..language end
+    local function toggle(button, key, value)
+        button.Text=(value and "✓  " or "○  ")..tr(key)
+        button.TextColor3=value and COLORS.light or COLORS.quiet
+        button.BackgroundColor3=value and COLORS.nav or COLORS.panel
+    end
+    ui.settings.language.Text=tr("language").."  •  "..language
+    ui.settings.startup.Text=tr("startup").."  •  "..tr(ui.tabLabels[prefs.startup])
+    ui.settings.creator.Text=tr(state.admin.token and "creatorOpen" or "creatorLogin")
+    toggle(ui.settings.translation,"enableTranslation",state.autoTranslate)
+    toggle(ui.settings.motion,"motion",prefs.motion)
+    toggle(ui.settings.glow,"glow",prefs.glow)
+    toggle(ui.settings.badge,"unreadBadge",prefs.badge)
+    reportInfo.Text=tr("externalNotice").."\n"..tr("report")
+    if ui.statusKey then statusBar.Text=tr(ui.statusKey,table.unpack(ui.statusArgs,1,ui.statusArgs.n)) end
 end
 retranslateUI=updateLabels
 
 selected=function(key)
+    local changed=ui.shownPage~=key
+    if changed and ui.focusedInput then ui.focusedInput:ReleaseFocus() end
+    if ui.pageTween then ui.pageTween:Cancel();ui.pageTween=nil end
+    if ui.page then ui.page.Position=UDim2.fromOffset(0,0) end
+    ui.shownPage=key
     state.active=key
+    animate(ui.settingsButton,.18,{BackgroundColor3=key=="ajustes" and COLORS.violet or COLORS.nav})
     state.unread=0;badge.Visible=false
-    for k,p in pairs(state.tabs) do p.frame.Visible=(k==key) end
+    for k,p in pairs(state.tabs) do
+        p.frame.Visible=(k==key)
+        if k~=key then p.quick.Visible=false;p.emojiPanel.Visible=false end
+    end
     settings.Visible=(key=="ajustes");debugPanel.Visible=(key=="debug");creator.Visible=(key=="criador")
     for k,p in pairs(tabButtons) do
         local active=(key==k)
@@ -1333,15 +1586,16 @@ selected=function(key)
         animate(p.edge,.2,{Color=active and Color3.fromRGB(218,127,255) or Color3.fromRGB(77,55,139),
             Thickness=active and 1.9 or 1})
         p.dot.Visible=active
-        p.glow.Visible=active
+        p.glow.Visible=active and prefs.glow
         p.fill.Color=active and ColorSequence.new(Color3.fromRGB(190,90,255),Color3.fromRGB(104,25,225))
             or ColorSequence.new(Color3.fromRGB(55,42,91),Color3.fromRGB(30,25,56))
     end
     if messageTabs[key] then
         if key=="local" then
-            toast(tr("localOnly"),true)
+            ui.notice("localOnly",true)
         elseif key=="privado" then
-            toast(state.privateCode and ("🔒 Sala "..state.privateCode) or "Crie ou entre em uma sala privada",true)
+            if state.privateCode then ui.notice("room",true,state.privateCode)
+            else ui.notice("privateWelcome",true) end
         else
             toast("🌎 Firebase /"..tostring(CHANNEL_PATHS[key]),true)
         end
@@ -1352,12 +1606,17 @@ selected=function(key)
         animate(panel.head,.22,{BackgroundTransparency=.12})
     end
     ui.fit()
+    ui.page=panel and panel.frame or (key=="ajustes" and settings or (key=="debug" and debugPanel or creator))
+    if changed and prefs.motion then
+        ui.page.Position=UDim2.fromOffset(0,13)
+        ui.pageTween=animate(ui.page,.24,{Position=UDim2.fromOffset(0,0)},Enum.EasingStyle.Quart)
+    end
     refreshStatus()
 end
 
 refreshStatus=function()
     local lines={
-        "GlobalChatHub V5.5.3 | NEON UI + FIREBASE AUTH",
+        "GlobalChatHub V5.6.0 | NEON UI + FIREBASE AUTH",
         "PlaceId="..tostring(game.PlaceId),
         "Transport="..state.firebaseTransport,
         "FirebaseHTTP="..state.firebaseStatus,
@@ -1366,6 +1625,8 @@ refreshStatus=function()
         "FirebaseError="..state.firebaseError,
         "Channels=global,brasil,usa (independentes)",
         "ActiveTab="..state.active,
+        "Language="..state.language.." ("..prefs.language..")",
+        "StartupTab="..prefs.startup,
         "PrivateRoom="..tostring(state.privateCode or "none"),
         "Messages="..state.messages,
         "Translations="..state.translationHits,
@@ -1383,44 +1644,76 @@ end
 
 
 
-connect(creatorEntry.MouseButton1Click,function()
-    selected("criador")
+connect(ui.settingsButton.Activated,function()
+    if state.active=="ajustes" then selected(ui.previousPage or prefs.startup)
+    else ui.previousPage=state.active;selected("ajustes") end
 end)
-connect(languageButton.MouseButton1Click,function()
-    state.language=(state.language=="pt" and "en" or state.language=="en" and "es" or "pt")
-    retranslateUI();refreshStatus()
+connect(ui.settings.creator.Activated,function() selected("criador") end)
+connect(ui.settings.language.Activated,function()
+    local nextMode={auto="pt",pt="en",en="es",es="auto"}
+    prefs.language=nextMode[prefs.language]
+    state.language=prefs.detectLanguage()
+    prefs.save()
+    retranslateUI()
+    refreshStatus()
 end)
-connect(transButton.MouseButton1Click,function()
+connect(ui.settings.translation.Activated,function()
     state.autoTranslate=not state.autoTranslate
-    retranslateUI();toast(tr("translationHint"),true)
+    prefs.save()
+    retranslateUI()
 end)
-connect(soundsButton.MouseButton1Click,function()
-    state.sounds=not state.sounds;retranslateUI()
+for _, key in ipairs({"motion","glow","badge"}) do
+    connect(ui.settings[key].Activated,function()
+        prefs[key]=not prefs[key]
+        prefs.save()
+        ui.setGlow()
+        badge.Visible=prefs.badge and state.unread>0
+        retranslateUI()
+    end)
+end
+connect(ui.settings.startup.Activated,function()
+    local nextTab={global="local",["local"]="brasil",brasil="usa",usa="global"}
+    prefs.startup=nextTab[prefs.startup]
+    prefs.save()
+    retranslateUI()
+    refreshStatus()
 end)
-connect(nativeButton.MouseButton1Click,function()
-    toast("Testando Firebase...",true)
+connect(ui.settings.reset.Activated,function()
+    prefs.language="auto";prefs.startup="global"
+    prefs.motion=true;prefs.glow=true;prefs.badge=true;state.autoTranslate=false
+    state.language=prefs.detectLanguage()
+    prefs.save()
+    ui.setGlow()
+    badge.Visible=state.unread>0
+    retranslateUI()
+    ui.notice("resetDone",true)
+    refreshStatus()
+end)
+connect(ui.settings.connection.Activated,function()
+    ui.notice("testing",true)
     task.spawn(function()
         local data,err=fbGet("/ping.json")
         if not state.alive then return end
-        if data~=nil then toast("✅ Firebase respondeu HTTP "..state.firebaseStatus,true)
+        if data~=nil then ui.notice("firebaseReply",true,state.firebaseStatus)
         else toast("❌ Firebase: "..tostring(err),false) end
         refreshStatus()
     end)
 end)
-connect(clearButton.MouseButton1Click,function()
+connect(ui.settings.clear.Activated,function()
     for _,tab in pairs(state.tabs) do
-        for _,entry in ipairs(tab.entries) do pcall(function() entry:Destroy() end) end
+        for _,entry in ipairs(tab.entries) do entry:Destroy() end
         tab.entries={}
+        tab.count=0
     end
-    toast("Histórico local limpo",true)
+    ui.notice("chatCleared",true)
 end)
-connect(copyButton.MouseButton1Click,function()
+connect(copyButton.Activated,function()
     local value=refreshStatus()
     if type(setclipboard)=="function" then
         local ok=pcall(setclipboard,value)
-        toast(ok and "Diagnóstico copiado" or "Não foi possível copiar",ok)
+        ui.notice(ok and "copied" or "copyFailed",ok)
     else
-        print(value);toast("Diagnóstico no console",true)
+        print(value);ui.notice("console",true)
     end
 end)
 
@@ -1445,10 +1738,10 @@ local function sendMessage(key,text)
     if not state.alive then return end
     text=trimText(text)
     if text=="" then return end
-    if #text>400 then toast("Mensagem muito grande (400 bytes)",false);return end
+    if #text>400 then ui.notice("tooLarge",false);return end
     local when=state.sentByTab[key] or -100
     if os.clock()-when<2.0 then toast(tr("wait"),false);return end
-    if state.pendingSend[key] then toast("Envio anterior em andamento",false);return end
+    if state.pendingSend[key] then ui.notice("sendPending",false);return end
     if key~="local" then
         local denied,why=isModerated()
         if denied then toast("⛔ "..why,false);return end
@@ -1462,7 +1755,7 @@ local function sendMessage(key,text)
             if not state.alive then return end
             if not ok then errorState(result);toast(tr("noSend"),false);return end
             if state.tabs[key] and state.tabs[key].input.Text==text then state.tabs[key].input.Text="" end
-            toast("Mensagem enviada ao chat local",true)
+            ui.notice("localSent",true)
         end)
         return
     end
@@ -1471,7 +1764,7 @@ local function sendMessage(key,text)
     elseif key=="privado" and state.privateCode then
         path="/rooms/"..state.privateCode.."/msgs.json"
     end
-    if not path then toast("Entre em uma sala privada primeiro",false);return end
+    if not path then ui.notice("needRoom",false);return end
     state.pendingSend[key]=true
     state.sentByTab[key]=os.clock()
     local currentText=text
@@ -1501,7 +1794,7 @@ local function sendMessage(key,text)
         if result then
             local input=state.tabs[key] and state.tabs[key].input
             if input and input.Text==currentText then input.Text="" end
-            toast("Mensagem enviada ao Firebase",true)
+            ui.notice("firebaseSent",true)
             local sentPanel=state.tabs[key]
             if sentPanel then
                 sentPanel.scrollToBottom()
@@ -1510,13 +1803,13 @@ local function sendMessage(key,text)
             end
         else
             errorState(err)
-            toast("❌ Falha de envio: "..tostring(err),false)
+            ui.notice("sendFailed",false,tostring(err))
         end
         refreshStatus()
     end)
 end
 for key,p in pairs(state.tabs) do
-    connect(p.send.MouseButton1Click,function() sendMessage(key,p.input.Text) end)
+    connect(p.send.Activated,function() sendMessage(key,p.input.Text) end)
     connect(p.input.FocusLost,function(enter)
         if enter then sendMessage(key,p.input.Text) end
     end)
@@ -1543,15 +1836,15 @@ end
 connect(TextChatService.MessageReceived,receiveLocal)
 
 local function getRoomInfo(code)
-    if not codeValid(code) then return nil,"Código inválido" end
+    if not codeValid(code) then return nil,tr("invalidRoom") end
     local info,err=fbGet("/rooms/"..code.."/info.json")
     if not info then return nil,err end
-    if type(info)~="table" or not info.c then return nil,"Sala não encontrada" end
+    if type(info)~="table" or not info.c then return nil,tr("missingRoom") end
     return info,nil
 end
-local function joinRoom(code,fromCreation)
+local function joinRoom(code)
     code=tostring(code or ""):upper():gsub("%s+","")
-    if not codeValid(code) then toast("Código inválido",false);return end
+    if not codeValid(code) then ui.notice("invalidRoom",false);return end
     task.spawn(function()
         local info,err=getRoomInfo(code)
         if not state.alive then return end
@@ -1559,17 +1852,19 @@ local function joinRoom(code,fromCreation)
         state.roomGeneration=state.roomGeneration+1
         state.privateCode=code
         local tab=state.tabs.privado
-        tab.roomStatus.Text="🔒 SALA "..code.." • "..(fromCreation and "Criada" or "Conectada")
+        ui.updateRoomText()
         tab.roomCode.Text=code
         for _,row in ipairs(tab.entries) do pcall(function() row:Destroy() end) end
         tab.entries={};tab.count=0
-        plainMessage("privado","🔐 Entrou na sala "..code..". Compartilhe o código com quem deseja convidar.")
+        plainMessage("privado",tr("roomJoined",code))
         selected("privado")
     end)
 end
 local function createRoom()
     local p=state.tabs.privado
-    p.createBtn.Text="⏳ Criando"
+    if p.creating then return end
+    p.creating=true
+    ui.text(p.createBtn,"creatingRoom")
     task.spawn(function()
         local chosen=nil
         for attempt=1,5 do
@@ -1584,33 +1879,38 @@ local function createRoom()
         end
         if chosen then
             local token,authErr=playerToken()
-            if not token then toast("Login Firebase: "..tostring(authErr),false);return end
+            if not token then
+                p.creating=false
+                if state.alive then ui.text(p.createBtn,"createRoom");toast("Login Firebase: "..tostring(authErr),false) end
+                return
+            end
             local created,err=fbPut("/rooms/"..chosen.."/info.json",{
                 c=player.Name,uid=player.UserId,creatorAuthUid=state.auth.uid,
                 ts=os.time(),v="5.3"
             },token)
-            if created then joinRoom(chosen,true)
+            if created then joinRoom(chosen)
             else toast("Erro ao criar: "..tostring(err),false) end
         else
             toast("Não foi possível reservar um código de sala",false)
         end
-        if p.createBtn and p.createBtn.Parent then p.createBtn.Text="✨ CRIAR SALA" end
+        p.creating=false
+        if state.alive then ui.text(p.createBtn,"createRoom") end
     end)
 end
 local pPrivate=state.tabs.privado
-connect(pPrivate.createBtn.MouseButton1Click,createRoom)
-connect(pPrivate.joinBtn.MouseButton1Click,function() joinRoom(pPrivate.roomCode.Text,false) end)
+connect(pPrivate.createBtn.Activated,createRoom)
+connect(pPrivate.joinBtn.Activated,function() joinRoom(pPrivate.roomCode.Text) end)
 connect(pPrivate.roomCode.FocusLost,function(enter)
-    if enter then joinRoom(pPrivate.roomCode.Text,false) end
+    if enter then joinRoom(pPrivate.roomCode.Text) end
 end)
-connect(pPrivate.inviteBtn.MouseButton1Click,function()
-    if not state.privateCode then toast("Crie ou entre numa sala primeiro",false);return end
+connect(pPrivate.inviteBtn.Activated,function()
+    if not state.privateCode then ui.notice("needRoom",false);return end
     local target=trimText(pPrivate.recipient.Text)
     if not target:match("^[%w_]+$") or #target<3 or #target>20 then
-        toast("Digite o nome de usuário exato, sem espaços",false);return
+        ui.notice("inviteUsername",false);return
     end
-    if target:lower()==player.Name:lower() then toast("Não pode convidar a si mesmo",false);return end
-    if os.clock()-state.inviteLast<8 then toast("Aguarde 8s para outro convite",false);return end
+    if target:lower()==player.Name:lower() then ui.notice("inviteSelf",false);return end
+    if os.clock()-state.inviteLast<8 then ui.notice("inviteCooldown",false);return end
     state.inviteLast=os.clock()
     task.spawn(function()
         local token,authErr=playerToken()
@@ -1620,7 +1920,8 @@ connect(pPrivate.inviteBtn.MouseButton1Click,function()
             code=state.privateCode,ts=os.time(),to=target
         },token)
         if not state.alive then return end
-        toast(result and "Convite enviado!" or ("Falha no convite: "..tostring(err)),result~=nil)
+        if result then ui.notice("inviteSent",true)
+        else ui.notice("inviteError",false,tostring(err)) end
     end)
 end)
 
@@ -1629,7 +1930,7 @@ local function showInvite(from,code)
     if state.currentInvite then return end
     state.currentInvite={from=from,code=code}
     local p=state.tabs.privado
-    plainMessage("privado","🔔 "..from.." convidou você para a sala "..code)
+    plainMessage("privado",tr("roomInvite",from,code))
     if not p.prompt then
         local panel=instance("Frame",{Position=UDim2.new(0,0,1,-134),
             Size=UDim2.new(1,0,0,35),BackgroundColor3=COLORS.deep,BorderSizePixel=0},p.frame)
@@ -1637,12 +1938,14 @@ local function showInvite(from,code)
         p.prompt=panel
         p.accept=btn(panel,"✔ ENTRAR",{Size=UDim2.new(.5,-3,1,0),BackgroundColor3=COLORS.good})
         p.decline=btn(panel,"✖ RECUSAR",{Position=UDim2.new(.5,3,0,0),Size=UDim2.new(.5,-3,1,0),BackgroundColor3=COLORS.bad})
-        connect(p.accept.MouseButton1Click,function()
+        ui.text(p.accept,"accept")
+        ui.text(p.decline,"refuse")
+        connect(p.accept.Activated,function()
             local inv=state.currentInvite
             state.currentInvite=nil;p.prompt.Visible=false
-            if inv then joinRoom(inv.code,false) end
+            if inv then joinRoom(inv.code) end
         end)
-        connect(p.decline.MouseButton1Click,function()
+        connect(p.decline.Activated,function()
             state.currentInvite=nil;p.prompt.Visible=false
         end)
     end
@@ -1744,7 +2047,7 @@ loadCreatorReports=function()
                     Position=UDim2.new(spec[4],0,0,spec[3]*33),TextSize=17,
                     BackgroundColor3=spec[2]=="ban" and COLORS.bad or COLORS.accent})
                 local banConfirmed=false
-                b.MouseButton1Click:Connect(function()
+                b.Activated:Connect(function()
                     if spec[2]=="ban" and not banConfirmed then
                         banConfirmed=true
                         b.Text="CONFIRMAR BAN?"
@@ -1762,11 +2065,11 @@ loadCreatorReports=function()
                 BackgroundColor3=COLORS.good})
             local resolve=btn(last,"✔ RESOLVER",{Position=UDim2.new(.51,0,0,0),
                 Size=UDim2.new(.49,-2,1,0),TextSize=17,BackgroundColor3=COLORS.deep})
-            unban.MouseButton1Click:Connect(function() moderateAuthUid(target,"unban",entry.id) end)
+            unban.Activated:Connect(function() moderateAuthUid(target,"unban",entry.id) end)
             local deleteBtn=btn(line,"🗑️ APAGAR MENSAGEM DO FIREBASE",{
                 Size=UDim2.new(1,-12,0,28),TextSize=17,BackgroundColor3=COLORS.bad})
             local deleteConfirmed=false
-            deleteBtn.MouseButton1Click:Connect(function()
+            deleteBtn.Activated:Connect(function()
                 local id=tostring(r.messageId or "")
                 local channel=tostring(r.channel or "")
                 local rootPath=nil
@@ -1799,7 +2102,7 @@ loadCreatorReports=function()
                     end
                 end)
             end)
-            resolve.MouseButton1Click:Connect(function()
+            resolve.Activated:Connect(function()
                 task.spawn(function()
                     local t=adminToken()
                     if not t then toast("Sessao expirada",false);return end
@@ -1813,7 +2116,7 @@ loadCreatorReports=function()
         if unseen>0 then toast("👑 "..tostring(unseen).." novas denuncias",true) end
     end)
 end
-connect(creatorLoginBtn.MouseButton1Click,function()
+connect(creatorLoginBtn.Activated,function()
     if state.admin.loginPending then return end
     local email=trimText(creatorEmail.Text)
     local password=creatorPassword.Text
@@ -1822,13 +2125,13 @@ connect(creatorLoginBtn.MouseButton1Click,function()
         toast("Informe email e senha Firebase Auth validos",false);return
     end
     state.admin.loginPending=true
-    creatorLoginBtn.Text="⏳ VALIDANDO..."
+    ui.text(creatorLoginBtn,"validating")
     task.spawn(function()
         local result,err=firebaseAuthEmail(email,password)
         password=nil
         if not state.alive then return end
         state.admin.loginPending=false
-        creatorLoginBtn.Text="🔐 LOGIN SEGURO"
+        ui.text(creatorLoginBtn,"signIn")
         if not result then toast("Login falhou: "..tostring(err),false);return end
         -- Mesmo que a UI leia um papel falso, /reports e /moderation continuam protegidos nas Rules.
         local role,roleErr=fbGet("/admins/"..tostring(result.localId)..".json",result.idToken)
@@ -1838,16 +2141,18 @@ connect(creatorLoginBtn.MouseButton1Click,function()
         a.uid=result.localId;a.expireAt=os.time()+(tonumber(result.expiresIn) or 3600)
         creatorLogin.Visible=false;creatorDashboard.Visible=true
         tabButtons.criador.button.Visible=false
+        retranslateUI()
         toast("👑 Criador autenticado",true)
         loadCreatorReports()
     end)
 end)
-connect(creatorRefresh.MouseButton1Click,loadCreatorReports)
-connect(creatorLogout.MouseButton1Click,function()
+connect(creatorRefresh.Activated,loadCreatorReports)
+connect(creatorLogout.Activated,function()
     local a=state.admin
     a.token=nil;a.refreshToken=nil;a.uid=nil;a.expireAt=0;a.reportSeen={}
     creatorDashboard.Visible=false;creatorLogin.Visible=true
     tabButtons.criador.button.Visible=false
+    retranslateUI()
     selected("ajustes");toast("Conta criador desconectada",true)
 end)
 -- Checar punicoes periodicamente; a protecao contra clientes modificados exige backend.
@@ -2014,7 +2319,7 @@ task.spawn(function()
             local tab=state.tabs[key]
             if tab and tab.online and tab.online.Parent then
                 tab.online.Text=onlineCount and ("Online: "..tostring(onlineCount))
-                    or "Indisponível"
+                    or tr("unavailable")
                 tab.onlineDot.Visible=onlineCount~=nil and onlineCount>0
             end
         end
@@ -2081,30 +2386,36 @@ end
 moveOnDrag(top,main)
 moveOnDrag(bubble,bubble)
 
+ui.bubbleMotion=instance("UIScale",{Scale=1},bubble)
 local animatingWindow=false
 local function minimize()
     if animatingWindow or state.minimized then return end
     animatingWindow=true;state.minimized=true
     if ui.focusedInput then ui.focusedInput:ReleaseFocus() end
     ui.fit()
-    animate(ui.motion,.18,{Scale=.94},Enum.EasingStyle.Quart,Enum.EasingDirection.In)
-    task.delay(.19,function()
+    if prefs.motion then animate(ui.motion,.18,{Scale=.94},Enum.EasingStyle.Quart,Enum.EasingDirection.In) end
+    local function hide()
         if not state.alive then return end
         main.Visible=false;bubble.Visible=true
-        bubble.Size=UDim2.fromOffset(40,40)
-        animate(bubble,.25,{Size=UDim2.fromOffset(55,55)},Enum.EasingStyle.Back)
+        bubble.Size=UDim2.fromOffset(55,55)
+        if prefs.motion then
+            ui.bubbleMotion.Scale=.72
+            animate(ui.bubbleMotion,.27,{Scale=1},Enum.EasingStyle.Back)
+        end
         animatingWindow=false
-    end)
+    end
+    if prefs.motion then task.delay(.19,hide) else hide() end
 end
 local function restore()
     if bubbleMoved then bubbleMoved=false;return end
     if animatingWindow or not state.minimized then return end
     state.minimized=false;main.Visible=true;bubble.Visible=false
-    ui.motion.Scale=.94;animate(ui.motion,.25,{Scale=1},Enum.EasingStyle.Quart)
+    ui.motion.Scale=prefs.motion and .94 or 1
+    animate(ui.motion,.25,{Scale=1},Enum.EasingStyle.Quart)
     state.unread=0;badge.Visible=false
 end
-connect(minBtn.MouseButton1Click,minimize)
-connect(bubble.MouseButton1Click,restore)
+connect(minBtn.Activated,minimize)
+connect(bubble.Activated,restore)
 local function shutdown()
     if not state.alive then return end
     state.alive=false
@@ -2118,19 +2429,31 @@ local function shutdown()
     if store.GCH_V5_Shutdown==shutdown then store.GCH_V5_Shutdown=nil end
 end
 store.GCH_V5_Shutdown=shutdown
-connect(closeBtn.MouseButton1Click,shutdown)
+connect(closeBtn.Activated,shutdown)
 
 retranslateUI()
-selected("global")
-ui.motion.Scale=.96
-animate(ui.motion,.35,{Scale=1},Enum.EasingStyle.Quart)
-refreshStatus()
-plainMessage("global","💜 Bem-vindo! Chat mundial; Brasil e USA são canais separados.")
-plainMessage("brasil","🇧🇷 Canal da comunidade brasileira, disponível em qualquer servidor.")
-plainMessage("usa","🇺🇸 English-only community room; shared across all games.")
-plainMessage("privado","🔒 Crie uma sala, compartilhe o código ou convide outro jogador pelo nome.")
-plainMessage("local","💬 Chat local usa TextChatService do Roblox.")
+selected(prefs.startup)
+ui.motion.Scale=prefs.motion and .91 or 1
+animate(ui.motion,.36,{Scale=1},Enum.EasingStyle.Quart)
+for key, welcome in pairs({
+    global="globalWelcome", brasil="brazilWelcome", usa="usWelcome",
+    privado="privateWelcome", ["local"]="localWelcome",
+}) do
+    plainMessage(key,tr(welcome),welcome)
+end
+
+task.spawn(function()
+    local ok, country=pcall(function() return Localization:GetCountryRegionForPlayerAsync(player) end)
+    if not state.alive or not ok or type(country)~="string" then return end
+    prefs.region=string.upper(country)
+    local language=prefs.detectLanguage()
+    if language~=state.language then
+        state.language=language
+        retranslateUI()
+        refreshStatus()
+    end
+end)
 -- O painel Debug mostra o status em tempo real e os erros do backend.
 
 
-print("[GlobalChatHub V5.5.3] Neon Chat UI + Firebase REST | canais preservados")
+print("[GlobalChatHub V5.6.0] Neon Chat UI + Firebase REST | canais preservados")
